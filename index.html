@@ -204,6 +204,222 @@ function SpecialFlow({ state, revealer, specials, names, onDone }) {
   </div></div>;
 }
 
+// ============================================================================
+// OnlineGame — 🌐オンライン対戦（Django Channels 権威サーバーと WebSocket 通信）
+// サーバーの view(view_for) メッセージ駆動で盤面を描画。ローカルcore.jsは呼ばない。
+// ============================================================================
+function wsBase() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const host = location.host || "localhost:8000";
+  return proto + "://" + host + "/ws/room/";
+}
+function OnlineGame({ onExit }) {
+  const [phase, setPhase] = useState("setup"); // setup|lobby|game
+  const [server, setServer] = useState(wsBase());
+  const [name, setName] = useState("");
+  const [joinCode, setJoinCode] = useState("");
+  const [room, setRoom] = useState(null); // {code, seat, token}
+  const [lobby, setLobby] = useState(null);
+  const [view, setView] = useState(null);
+  const [gamePhase, setGamePhase] = useState("play");
+  const [wan, setWan] = useState(null); // {revealer, deadline, responded}
+  const [wanDone, setWanDone] = useState(false);
+  const [special, setSpecial] = useState(null); // {revealer, deadline, rowCards}
+  const [reveal, setReveal] = useState(null);
+  const [toast, setToast] = useState("");
+  const [now, setNow] = useState(Date.now());
+  const wsRef = useRef(null);
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(t);
+  }, []);
+
+  function saved() { try { return JSON.parse(localStorage.getItem("cw_online") || "null"); } catch (e) { return null; } }
+  function save(o) { try { localStorage.setItem("cw_online", JSON.stringify(o)); } catch (e) {} }
+
+  function connect(code, token, after) {
+    const url = server + code + "/" + (token ? "?token=" + encodeURIComponent(token) : "");
+    let ws;
+    try { ws = new WebSocket(url); } catch (e) { setToast("接続失敗: " + e.message); return; }
+    wsRef.current = ws;
+    ws.onopen = () => { if (after) after(ws); };
+    ws.onclose = () => { setToast("切断されました"); };
+    ws.onerror = () => { setToast("WS接続エラー（サーバー起動/URL確認）"); };
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      handle(m);
+    };
+  }
+  function send(obj) { const ws = wsRef.current; if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  function handle(m) {
+    switch (m.type) {
+      case "created":
+      case "joined": {
+        const r = { code: m.code, seat: m.seat, token: m.token };
+        setRoom(r); save({ code: m.code, token: m.token }); setPhase("lobby"); break;
+      }
+      case "room_state": setLobby(m); if (phase === "setup") setPhase("lobby"); break;
+      case "started": setPhase("game"); setGamePhase("play"); break;
+      case "view": setView(m.view); setGamePhase(m.phase);
+        if (m.phase === "play") { setWan(null); setSpecial(null); setWanDone(false); } break;
+      case "wan_phase": setWan({ revealer: m.revealer, deadline: m.deadline, responded: [] }); setWanDone(false); setSpecial(null); setPhase("game"); break;
+      case "wan_progress": setWan((w) => w ? { ...w, responded: m.responded, total: m.total } : w); break;
+      case "special_phase": setSpecial({ revealer: m.revealer, deadline: m.deadline, rowCards: m.rowCards }); setWan(null); break;
+      case "reveal_result": setReveal(m); setWan(null); setSpecial(null); break;
+      case "gameover": setToast(m.reason === "abandoned" ? "流局（人数不足）" : "ゲーム終了"); break;
+      case "player_disconnected": setToast("席" + (m.seat + 1) + " 切断（" + m.graceSec + "秒以内に復帰可）"); break;
+      case "player_reconnected": setToast("席" + (m.seat + 1) + " 復帰"); break;
+      case "error": setToast("⚠ " + (m.message || m.code)); break;
+      default: break;
+    }
+  }
+
+  function doCreate() { connect("AAAAA", null, (ws) => ws.send(JSON.stringify({ type: "create_room", name: name || "P1" }))); }
+  function doJoin() {
+    const code = (joinCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
+    if (code.length !== 5) { setToast("5文字のコードを入力"); return; }
+    connect(code, null, (ws) => ws.send(JSON.stringify({ type: "join", name: name || "P" })));
+  }
+  function doReconnect() {
+    const s = saved(); if (!s) return;
+    connect(s.code, s.token, () => { setRoom({ code: s.code, token: s.token }); });
+  }
+  const secLeft = (dl) => Math.max(0, Math.ceil((dl - now) / 1000));
+
+  // ---- 画面 ----
+  if (phase === "setup") {
+    const s = saved();
+    return <div className="wrap">
+      <h1>🌐 オンライン対戦</h1>
+      <div className="panel">
+        <div className="sub">サーバーURL（daphne起動時は既定でOK）</div>
+        <input value={server} onChange={(e) => setServer(e.target.value)} style={inpStyle} />
+        <div className="sub" style={{ marginTop: 8 }}>あなたの名前</div>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="P1" style={inpStyle} />
+        <div className="center" style={{ marginTop: 12 }}>
+          <button onClick={doCreate}>ルーム作成</button>
+        </div>
+        <div className="center" style={{ marginTop: 10 }}>
+          <input value={joinCode} onChange={(e) => setJoinCode(e.target.value)} placeholder="コード5文字" style={{ ...inpStyle, width: 130, display: "inline-block" }} />
+          <button className="ghost" onClick={doJoin}>コードで参加</button>
+        </div>
+        {s && <div className="center" style={{ marginTop: 10 }}><button className="ghost" onClick={doReconnect}>前回の部屋に再接続（{s.code}）</button></div>}
+      </div>
+      <div className="center"><button className="ghost" onClick={onExit}>← 戻る</button></div>
+      {toast && <div className="panel center" style={{ color: "var(--accent)" }}>{toast}</div>}
+    </div>;
+  }
+
+  if (phase === "lobby") {
+    const isHost = lobby && lobby.hostSeat === (room && room.seat);
+    return <div className="wrap">
+      <h1>ロビー 🐕</h1>
+      <div className="panel center">
+        <div className="big">コード: <b>{lobby ? lobby.code : (room && room.code)}</b></div>
+        <div className="sub">この5文字を相手に伝えて参加してもらう</div>
+      </div>
+      <div className="panel">
+        <b>参加者</b>
+        {lobby && lobby.players.map((p) => <div key={p.seat}>
+          {p.isHost ? "👑" : "・"}{p.name} {p.connected ? "" : "（切断中）"} {p.seat === (room && room.seat) ? "← あなた" : ""}
+        </div>)}
+      </div>
+      {isHost ? <div className="center"><button disabled={!lobby || lobby.players.length < 2} onClick={() => send({ type: "start" })}>ゲーム開始（{lobby ? lobby.players.length : 0}人）</button></div>
+        : <div className="sub center">ホストの開始を待っています…</div>}
+      <div className="center"><button className="ghost" onClick={onExit}>← 退出</button></div>
+      {toast && <div className="panel center" style={{ color: "var(--accent)" }}>{toast}</div>}
+    </div>;
+  }
+
+  // --- ゲーム画面（サーバーview駆動） ---
+  if (!view) return <div className="wrap center">接続中… {toast}</div>;
+  const mySeat = room ? room.seat : view.viewer;
+  const names = view.players.map((p) => "P" + (p.index + 1));
+  const cpuFlags = view.players.map(() => false);
+  const myTurn = view.current === mySeat && gamePhase === "play" && !view.finished;
+  const myHand = (view.players[mySeat] && view.players[mySeat].hand) || [];
+  const iAmRevealer = special && special.revealer === mySeat;
+
+  return <div className="wrap">
+    <div className="players">
+      {view.players.map((p, i) => <div key={i} className={"pchip" + (i === view.current ? " cur" : "")}
+        style={{ boxShadow: "inset 0 -3px 0 " + PCOLORS[i % PCOLORS.length] }}>
+        <b>{names[i]}</b> {p.score}点{i === mySeat ? "（あなた）" : ""}<br />
+        <span className="tag">🪙{p.tokens}</span> <span className="tag">手{p.handCount}</span>
+      </div>)}
+    </div>
+    <div className="panel">
+      <div style={{ fontSize: 12, opacity: .8 }}>場（{view.row.length}/12）山{view.deckCount}/捨{view.discardCount}</div>
+      <div className="row-cards">
+        {view.row.map((vc) => <RowCard key={vc.id} vc={vc} names={names} cpuFlags={cpuFlags} viewer={mySeat} />)}
+        {view.row.length === 0 && <span style={{ opacity: .5, fontSize: 13 }}>まだ場札なし</span>}
+      </div>
+      <div className="sub">値が見えるのは自分が置いたカードだけ</div>
+    </div>
+    <div className="panel">
+      <div style={{ fontSize: 12, opacity: .8 }}>あなたの手札</div>
+      <div className="hand">
+        {myHand.map((c, i) => <Card key={i} c={c} faceUp={true} dim={!myTurn || c.t === "special"}
+          onClick={myTurn && c.t === "butt" ? () => send({ type: "action", action: { type: "play", cardIndex: i } }) : undefined} />)}
+      </div>
+      {myTurn ? <div>
+        <button onClick={() => send({ type: "action", action: { type: "reveal" } })}>公開する</button>
+        <button className="ghost" disabled={view.players[mySeat].tokens <= 0 || view.row.length < 1}
+          onClick={() => { const f = prompt("移動元(1〜" + view.row.length + ")"); if (!f) return; const t = prompt("移動先(1〜" + view.row.length + ")"); if (!t) return; send({ type: "action", action: { type: "move", from: (+f) - 1, to: (+t) - 1 } }); }}>移動（🪙-1）</button>
+      </div> : <div className="sub">{view.finished ? "ゲーム終了" : "P" + (view.current + 1) + " の手番…"}</div>}
+    </div>
+
+    {wan && !wanDone && <div className="modal"><div className="sheet">
+      <div className="center"><b>ワン！同時宣言</b>（残り{secLeft(wan.deadline)}秒）</div>
+      <div className="sub center">連番が何まで続くか予想。他者の宣言は締切まで非公開。回答済み: {(wan.responded || []).length}人</div>
+      <div className="num-grid">
+        {Array.from({ length: 12 }, (_, i) => i + 1).map((v) => <button key={v} onClick={() => { send({ type: "wan_declare", value: v }); setWanDone(true); }}>{v}</button>)}
+      </div>
+      <div className="center"><button className="ghost" onClick={() => { send({ type: "wan_declare", value: null }); setWanDone(true); }}>宣言しない</button></div>
+    </div></div>}
+    {wan && wanDone && <div className="modal"><div className="sheet center">宣言しました。他プレイヤーを待っています…（残り{secLeft(wan.deadline)}秒）</div></div>}
+
+    {special && (iAmRevealer
+      ? <OnlineSpecial special={special} onDone={(sp) => { send({ type: "special", card: sp ? sp.type : null, number: sp ? sp.number : undefined }); setSpecial(null); }} secLeft={secLeft} />
+      : <div className="modal"><div className="sheet center">公開者が特殊カードを選択中…（残り{secLeft(special.deadline)}秒）</div></div>)}
+
+    {reveal && <RevealModal reveal={{ result: reveal.result, rowCards: reveal.rowCards, revealer: reveal.revealer, wans: (reveal.wans || []).map((w) => ({ player: w.seat, delta: w.delta })), forced: reveal.forced }} names={names} cpuFlags={cpuFlags} onClose={() => setReveal(null)} />}
+
+    {view.finished && <div className="panel center"><b>🏆 {view.winner === "draw" ? "引き分け" : "P" + (view.winner + 1) + " の勝ち！"}</b><br /><button className="ghost" onClick={onExit}>タイトルへ</button></div>}
+    <div className="panel">
+      <div style={{ fontSize: 13 }}>📜 履歴（{view.history.length}）</div>
+      <div className="log">{view.history.slice().reverse().slice(0, 12).map((h, i) => <div key={i}>{histText(h, names, cpuFlags)}</div>)}</div>
+    </div>
+    {toast && <div className="panel center" style={{ color: "var(--accent)", fontSize: 12 }}>{toast}</div>}
+  </div>;
+}
+const inpStyle = { width: "100%", padding: "9px", borderRadius: "8px", border: "1px solid #5a4433", background: "#2a1c14", color: "var(--ink)", fontSize: 14 };
+
+function OnlineSpecial({ special, onDone, secLeft }) {
+  const [amae, setAmae] = useState(false);
+  const rowVals = special.rowCards.map((c) => c.v);
+  const base = GC.scoreRow(rowVals);
+  const pv = (sp) => GC.scoreRow(rowVals, sp).total;
+  if (amae) return <div className="modal"><div className="sheet">
+    <div className="center"><b>甘えん坊</b>: 欠け数字を選択（残り{secLeft(special.deadline)}秒）</div>
+    <div className="num-grid">{Array.from({ length: 12 }, (_, i) => i + 1).map((v) => <button key={v} onClick={() => onDone({ type: "amaenbo", number: v })}>{v}<br /><span style={{ fontSize: 10 }}>{pv({ type: "amaenbo", number: v })}</span></button>)}</div>
+    <div className="center"><button className="ghost" onClick={() => setAmae(false)}>戻る</button></div>
+  </div></div>;
+  return <div className="modal"><div className="sheet">
+    <div className="center"><b>特殊カード</b>（任意・残り{secLeft(special.deadline)}秒）</div>
+    <div className="row-cards center" style={{ justifyContent: "center", margin: "8px 0" }}>{special.rowCards.map((c, i) => <div key={i} className="card">{c.v}</div>)}</div>
+    <div className="sub center">現在 {base.total}点（n={base.n}）</div>
+    <div className="center">
+      <button onClick={() => onDone({ type: "ohirune" })}>お昼寝<br /><span style={{ fontSize: 10 }}>{pv({ type: "ohirune" })}</span></button>
+      <button onClick={() => onDone({ type: "yancha" })}>やんちゃ<br /><span style={{ fontSize: 10 }}>{pv({ type: "yancha" })}</span></button>
+      <button onClick={() => setAmae(true)}>甘えん坊…</button>
+    </div>
+    <div className="center" style={{ marginTop: 8 }}><button className="ghost" onClick={() => onDone(null)}>使わない</button></div>
+  </div></div>;
+}
+
 function App() {
   const [screen, setScreen] = useState("title");
   const [cfg, setCfg] = useState({ mode: "cpu", players: 2, cpu: 1, difficulty: "normal" });
@@ -331,12 +547,18 @@ function App() {
   }
 
   // --- 画面 ---
+  if (screen === "online") {
+    return <OnlineGame onExit={() => setScreen("title")} />;
+  }
   if (screen === "title") {
     return <div className="wrap">
       <h1>チワワでワン撃 🐕</h1>
-      <div className="sub">記憶とブラフの連番構築カードゲーム / Phase 1</div>
+      <div className="sub">記憶とブラフの連番構築カードゲーム</div>
+      <div className="center" style={{ marginBottom: 8 }}>
+        <button style={{ fontSize: 16 }} onClick={() => setScreen("online")}>🌐 オンライン対戦</button>
+      </div>
       <div className="panel">
-        <div className="center"><b>モード</b></div>
+        <div className="center"><b>ローカル対戦モード</b></div>
         <div className="center">
           <button className={cfg.mode === "cpu" ? "" : "ghost"} onClick={() => setCfg({ ...cfg, mode: "cpu" })}>CPU対戦</button>
           <button className={cfg.mode === "hotseat" ? "" : "ghost"} onClick={() => setCfg({ ...cfg, mode: "hotseat" })}>ホットシート</button>
