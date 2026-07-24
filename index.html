@@ -699,18 +699,23 @@ function RevealModal({ reveal, names, cpuFlags, onClose }) {
     <div className="row-cards center" style={{ justifyContent: "center", margin: "8px 0" }}>
       {cards.map((c, i) => {
         const col = PCOLORS[c.placedBy % PCOLORS.length];
-        return <div key={i} className={"card rc" + (r && i < r.n ? " hl" : "")} style={{ borderColor: col }}>
+        // 得点対象カード（1起点の連番）を scoredIndices でハイライト。
+        // 未定義（旧データ）時のみ従来の先頭n枚にフォールバック。
+        const scored = r && (r.scoredIndices ? r.scoredIndices.indexOf(i) >= 0 : i < r.n);
+        return <div key={i} className={"card rc" + (scored ? " hl" : "")} style={{ borderColor: col }}>
           <span className="ob" style={{ background: col }}>{ownerBadge(c.placedBy, names, cpuFlags)}</span>
           <span className="rcv">{c.v}</span>
         </div>;
       })}
     </div>
-    <div className="sub center">枠色＝配置者（誰が置いたか）</div>
+    <div className="sub center">枠色＝配置者 / 黄枠＝得点対象（1を起点にした連番）</div>
     {r && <div className="breakdown center">
-      {r.wangeki ? <div className="big win">ワン撃！🐕‼ 即勝利</div> : <div>
+      {r.wangeki ? <div className="big win">ワン撃！🐕‼ 即勝利</div> : (r.total === 0 && r.startIndex === -1 ? <div>
+        場に「1」が無いため <b>0点</b>（1を起点にした連番のみ得点）
+      </div> : <div>
         連番 n={r.n} / 基礎点 {r.base} / 重複ペナ -{r.penalty}<br />
         <b>{names[reveal.revealer]} に {r.total}点</b>
-      </div>}
+      </div>)}
       {reveal.wans.map((w, i) => <div key={i}>{names[w.player]} ワン！{w.delta > 0 ? "+" : ""}{w.delta}</div>)}
     </div>}
     <div className="center"><button onClick={onClose}>次へ</button></div>
@@ -721,7 +726,7 @@ function RulesShort() {
   return <div className="panel" style={{ fontSize: 12, lineHeight: 1.6 }}>
     <b>ルール要約</b><br />
     手番: おしりカードを裏向きで場に出す / 公開して得点 / 場札を移動（🪙）。<br />
-    公開: 左端から1,2,3…と連番が続く長さnで基礎点 n(n+1)/2。重複は減点。<br />
+    公開: 場のどこかにある<b>1を起点</b>に1,2,3…と連番が続く長さnで基礎点 n(n+1)/2。1が無ければ0点・重複は減点。<br />
     1〜12を特殊カードなしで揃えたら<b>ワン撃</b>で即勝利。累計150点でも勝ち。<br />
     特殊: 甘えん坊(欠け1つ補完)/やんちゃ(欠け無視・その分減点)/お昼寝(重複ペナ無効)。
   </div>;

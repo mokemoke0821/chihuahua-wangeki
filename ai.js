@@ -51,32 +51,52 @@
   }
 
   // view から「連番の期待到達長(en・小数)」と「自分が置いた既知で確定している連番長(knownRun)」を推定。
+  // v0.4.1: 連番は場のどこかにある1を起点にする（起点より左は無視）。起点 start を全位置で試し、
+  // en が最大になる起点を採用（core.js scoreRow の最大起点方式に整合）。起点が確定できない
+  // 未知カードには残り分布から1である確率を織り込む（scoreRowと違い推定なので確率で評価）。
   function estimate(view, aiIndex) {
     const pool = unseenPool(view, aiIndex);
-    const cnt = Object.assign({}, pool.cnt);
-    let poolTotal = pool.total;
-    let expected = 1;
-    let en = 0;
-    let knownRun = 0;
-    let knownBroken = false;
-    for (let i = 0; i < view.row.length; i++) {
-      const c = view.row[i];
-      const known = c.placedBy === aiIndex && c.v != null;
-      if (known) {
-        if (c.v === expected) { en += 1; expected++; if (!knownBroken) knownRun++; }
-        else if (c.v === expected - 1) { /* 重複・継続 */ }
-        else { break; } // 既知で連番が切れた
-      } else {
-        knownBroken = true; // 未知が挟まると以降は確定扱いしない
-        const p = poolTotal > 0 ? (cnt[expected] || 0) / poolTotal : 0;
-        if (p <= 0) break;
-        en += p;
-        cnt[expected] = Math.max(0, (cnt[expected] || 0) - p);
-        poolTotal -= p;
-        expected++;
+    const row = view.row;
+
+    // 起点 start（=連番の"1"の位置）から走査した期待長と既知連番長を返す。
+    function scanFrom(start) {
+      const cnt = Object.assign({}, pool.cnt);
+      let poolTotal = pool.total;
+      let expected = 1;
+      let en = 0;
+      let knownRun = 0;
+      let knownBroken = false;
+      for (let i = start; i < row.length; i++) {
+        const c = row[i];
+        const known = c.placedBy === aiIndex && c.v != null;
+        if (known) {
+          if (c.v === expected) { en += 1; expected++; if (!knownBroken) knownRun++; }
+          else if (c.v === expected - 1) { /* 重複・継続 */ }
+          else { break; } // 既知で連番が切れた
+        } else {
+          knownBroken = true; // 未知が挟まると以降は確定扱いしない
+          const p = poolTotal > 0 ? (cnt[expected] || 0) / poolTotal : 0;
+          if (p <= 0) break;
+          en += p;
+          cnt[expected] = Math.max(0, (cnt[expected] || 0) - p);
+          poolTotal -= p;
+          expected++;
+        }
       }
+      return { en: en, knownRun: knownRun };
     }
-    return { en: en, knownRun: knownRun };
+
+    // 起点候補: 自分が置いた既知の1の位置＋未知カードの位置（未知は1でありうる）。
+    // 空なら空列扱い。全候補の最大 en を採用。
+    let best = { en: 0, knownRun: 0 };
+    for (let s = 0; s < row.length; s++) {
+      const c = row[s];
+      const knownNonOne = c.placedBy === aiIndex && c.v != null && c.v !== 1;
+      if (knownNonOne) continue; // 既知で1でない位置は起点になれない
+      const r = scanFrom(s);
+      if (r.en > best.en || (r.en === best.en && r.knownRun > best.knownRun)) best = r;
+    }
+    return best;
   }
 
   // 手番アクション選択（必ず legal を返す・view経由のみ参照）

@@ -110,68 +110,97 @@ def legal_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def score_row(row: List[Any], special: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    # ルール(v0.4.1): 連番は「値1のカードを起点」として右へ 1,2,3,... と続く分のみ得点対象。
+    # 1の位置は場のどこでもよく、起点より左は無視。1が無ければ0点。1が複数なら total 最大の起点を採用。
+    # JS版 core.js scoreRow とクロス言語一致（同一ロジック）。
     special = special or None
     vals = [c if isinstance(c, int) else c["v"] for c in row]
-    expected = 1
-    i = 0
-    occ: Dict[int, int] = {}
-    amae_used = False
-    yancha_used = False
-    yancha_missing = 0
 
-    def bump(v: int) -> None:
-        occ[v] = occ.get(v, 0) + 1
+    def scan_from(start: int) -> Dict[str, Any]:
+        expected = 1
+        i = start
+        occ: Dict[int, int] = {}
+        consumed: List[int] = []  # 得点対象になった実カードの元インデックス（UIハイライト用）
+        amae_used = False
+        yancha_used = False
+        yancha_missing = 0
 
-    while i < len(vals):
-        c = vals[i]
-        if c == expected:
-            bump(c)
-            expected += 1
-            i += 1
-        elif c == expected - 1 and expected > 1:
-            bump(c)
-            i += 1
-        elif (special and special.get("type") == "amaenbo" and not amae_used
-              and special.get("number") == expected):
+        def bump(v: int) -> None:
+            occ[v] = occ.get(v, 0) + 1
+
+        while i < len(vals):
+            c = vals[i]
+            if c == expected:
+                bump(c)
+                consumed.append(i)
+                expected += 1
+                i += 1
+            elif c == expected - 1 and expected > 1:
+                bump(c)
+                consumed.append(i)
+                i += 1
+            elif (special and special.get("type") == "amaenbo" and not amae_used
+                  and special.get("number") == expected):
+                bump(expected)
+                amae_used = True
+                expected += 1
+            elif (special and special.get("type") == "yancha" and not yancha_used
+                  and c > expected):
+                yancha_used = True
+                yancha_missing = expected
+                expected += 1
+            else:
+                break
+
+        # 末端補完（甘えん坊で連番末尾の次を埋める）
+        if (special and special.get("type") == "amaenbo" and not amae_used
+                and special.get("number") == expected):
             bump(expected)
             amae_used = True
             expected += 1
-        elif (special and special.get("type") == "yancha" and not yancha_used
-              and c > expected):
-            yancha_used = True
-            yancha_missing = expected
-            expected += 1
-        else:
-            break
 
-    # 末端補完（甘えん坊で連番末尾の次を埋める）
-    if (special and special.get("type") == "amaenbo" and not amae_used
-            and special.get("number") == expected):
-        bump(expected)
-        amae_used = True
-        expected += 1
+        n = expected - 1
+        base = (n * (n + 1)) // 2
+        if yancha_used:
+            base -= yancha_missing
 
-    n = expected - 1
-    base = (n * (n + 1)) // 2
-    if yancha_used:
-        base -= yancha_missing
+        wangeki = False
+        if n == 12:
+            if not special:
+                wangeki = True
+            else:
+                base = 66  # 特殊到達の12は基礎点66（ワン撃不成立）・重複ペナ通常適用
 
-    wangeki = False
-    if n == 12:
-        if not special:
-            wangeki = True
-        else:
-            base = 66  # 特殊到達の12は基礎点66（ワン撃不成立）・重複ペナ通常適用
-
-    penalty = 0
-    for k, cnt in occ.items():
-        if cnt >= 2:
-            penalty += k * cnt
-    if special and special.get("type") == "ohirune":
         penalty = 0
+        for k, cnt in occ.items():
+            if cnt >= 2:
+                penalty += k * cnt
+        if special and special.get("type") == "ohirune":
+            penalty = 0
 
-    total = base - penalty
-    return {"n": n, "base": base, "penalty": penalty, "total": total, "wangeki": wangeki}
+        total = base - penalty
+        return {
+            "n": n, "base": base, "penalty": penalty, "total": total, "wangeki": wangeki,
+            "startIndex": consumed[0] if consumed else -1,
+            "scoredIndices": consumed,
+        }
+
+    # 起点候補: 値1の位置。特殊使用時は任意位置も候補（甘えん坊/やんちゃが1を補いうる現行as-built維持）。
+    starts: List[int] = [j for j, v in enumerate(vals) if v == 1]
+    if special:
+        starts += list(range(len(vals)))
+        if len(vals) == 0:
+            starts.append(0)
+    if not starts:
+        return {"n": 0, "base": 0, "penalty": 0, "total": 0, "wangeki": False,
+                "startIndex": -1, "scoredIndices": []}
+
+    best: Optional[Dict[str, Any]] = None
+    for st in starts:
+        r = scan_from(st)
+        if best is None or r["total"] > best["total"] or (r["total"] == best["total"] and r["n"] > best["n"]):
+            best = r
+    return best
 
 
 def settle_wan(declarations: Optional[List[Dict[str, Any]]], n: int) -> Dict[int, int]:

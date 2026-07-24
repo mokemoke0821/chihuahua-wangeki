@@ -66,6 +66,43 @@ t("1..11 + 甘えん坊=12補完 → total 66 / wangeki false", function () {
   assert.strictEqual(r.wangeki, false);
 });
 
+// ---- v0.4.1: 1起点ルール（位置自由・1が無ければ0点・複数1は最大得点採用） ----
+t("v0.4.1 [1,2,3]=6 基本", function () {
+  assert.strictEqual(GC.scoreRow([1, 2, 3]).total, 6);
+});
+t("v0.4.1 [5,1,2,3]=6 1の位置自由・左の5無視", function () {
+  const r = GC.scoreRow([5, 1, 2, 3]);
+  assert.strictEqual(r.total, 6, "total=" + r.total);
+  assert.strictEqual(r.startIndex, 1, "startIndex=" + r.startIndex); // 起点は index1 の 1
+});
+t("v0.4.1 [1,3,4]=1 1のみ成立", function () {
+  assert.strictEqual(GC.scoreRow([1, 3, 4]).total, 1);
+});
+t("v0.4.1 [7,9,1,2,3,4]=10 起点より左は無視", function () {
+  const r = GC.scoreRow([7, 9, 1, 2, 3, 4]);
+  assert.strictEqual(r.total, 10, "total=" + r.total);
+  assert.strictEqual(r.startIndex, 2);
+});
+t("v0.4.1 [9,1,2,2,3]=2 起点左無視+重複(一貫式 penalty=値×枚数)", function () {
+  // 指示書の期待値4は penalty=値×1 の誤り。既存[1,2,2,3]=2と同一構造で 6-(2×2)=2 が正。
+  assert.strictEqual(GC.scoreRow([9, 1, 2, 2, 3]).total, 2);
+});
+t("v0.4.1 [1,1,2,3]=6 最大得点採用(2枚目の1起点で重複回避)", function () {
+  const r = GC.scoreRow([1, 1, 2, 3]);
+  assert.strictEqual(r.total, 6, "total=" + r.total);
+  assert.strictEqual(r.startIndex, 1);
+});
+t("v0.4.1 [1,5,1,2,3]=6 最大得点採用(2枚目の1起点)", function () {
+  const r = GC.scoreRow([1, 5, 1, 2, 3]);
+  assert.strictEqual(r.total, 6, "total=" + r.total);
+  assert.strictEqual(r.startIndex, 2);
+});
+t("v0.4.1 [2,3,4]=0 1が無ければ0点(startIndex=-1)", function () {
+  const r = GC.scoreRow([2, 3, 4]);
+  assert.strictEqual(r.total, 0);
+  assert.strictEqual(r.startIndex, -1);
+});
+
 t("ワン！精算: 宣言=最終n → +5 / 不一致 → -5", function () {
   const d = GC.settleWan([{ player: 0, value: 5 }, { player: 1, value: 4 }], 5);
   assert.strictEqual(d[0], 5, "p0 delta=" + d[0]);

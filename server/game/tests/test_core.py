@@ -50,6 +50,34 @@ class ScoreRowTest(unittest.TestCase):
         self.assertEqual(r["total"], 62)
         self.assertFalse(r["wangeki"])
 
+    # ---- v0.4.1: 1起点ルール（位置自由・1が無ければ0点・複数1は最大得点採用）JS版と一致 ----
+    def test_v041_one_anywhere(self):
+        self.assertEqual(core.score_row([1, 2, 3])["total"], 6)
+        r = core.score_row([5, 1, 2, 3])
+        self.assertEqual(r["total"], 6)  # 1の位置自由・左の5無視
+        self.assertEqual(r["startIndex"], 1)
+        self.assertEqual(core.score_row([1, 3, 4])["total"], 1)
+        r2 = core.score_row([7, 9, 1, 2, 3, 4])
+        self.assertEqual(r2["total"], 10)  # 起点より左は無視
+        self.assertEqual(r2["startIndex"], 2)
+
+    def test_v041_left_ignore_with_dup(self):
+        # 一貫式 penalty=値×枚数: [9,1,2,2,3] は [1,2,2,3] と同一で 6-(2×2)=2（指示書の4は誤り）
+        self.assertEqual(core.score_row([9, 1, 2, 2, 3])["total"], 2)
+
+    def test_v041_max_start_selection(self):
+        r = core.score_row([1, 1, 2, 3])
+        self.assertEqual(r["total"], 6)  # 2枚目の1起点で重複回避
+        self.assertEqual(r["startIndex"], 1)
+        r2 = core.score_row([1, 5, 1, 2, 3])
+        self.assertEqual(r2["total"], 6)
+        self.assertEqual(r2["startIndex"], 2)
+
+    def test_v041_no_one_zero(self):
+        r = core.score_row([2, 3, 4])
+        self.assertEqual(r["total"], 0)
+        self.assertEqual(r["startIndex"], -1)
+
     def test_settle_wan(self):
         d = core.settle_wan([{"player": 0, "value": 5}, {"player": 1, "value": 4}], 5)
         self.assertEqual(d[0], 5)

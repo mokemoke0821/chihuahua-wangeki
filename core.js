@@ -116,82 +116,120 @@ function legalActions(state) {
   return actions;
 }
 
-// ---- scoreRow(row, special?) → { n, base, penalty, total, wangeki } ----
+// ---- scoreRow(row, special?) → { n, base, penalty, total, wangeki, startIndex, scoredIndices } ----
 // row: butt カード配列 または 数値配列。special: null | {type,number?}
+// ルール(v0.4.1): 連番は「値1のカードを起点」として右へ 1,2,3,... と続く分のみ得点対象。
+// 1の位置は場のどこでもよく、起点より左のカードは無視（得点にも減点にも不参加）。
+// 場に1が無ければ0点。1が複数ある場合は total 最大になる起点を採用する。
 function scoreRow(row, special) {
   special = special || null;
   const vals = row.map(function (c) {
     return typeof c === "number" ? c : c.v;
   });
-  let expected = 1;
-  let i = 0;
-  const occ = {}; // 数字 -> 連番範囲内での連続出現枚数
-  let amaeUsed = false;
-  let yanchaUsed = false;
-  let yanchaMissing = 0;
 
-  function bump(v) {
-    occ[v] = (occ[v] || 0) + 1;
-  }
+  // 1つの起点 start から連番を走査（start より左は無視）。特殊カードの補完は従来どおり。
+  function scanFrom(start) {
+    let expected = 1;
+    let i = start;
+    const occ = {}; // 数字 -> 連番範囲内での連続出現枚数
+    const consumed = []; // 得点対象になった実カードの元インデックス（UIハイライト用）
+    let amaeUsed = false;
+    let yanchaUsed = false;
+    let yanchaMissing = 0;
 
-  while (i < vals.length) {
-    const c = vals[i];
-    if (c === expected) {
-      bump(c);
-      expected++;
-      i++;
-    } else if (c === expected - 1 && expected > 1) {
-      // 直前に数えた数字の連続重複
-      bump(c);
-      i++;
-    } else if (
-      special &&
-      special.type === "amaenbo" &&
-      !amaeUsed &&
-      special.number === expected
-    ) {
-      // 甘えん坊: 欠け数字を存在扱い（満額・iは進めない＝現カード再評価）
+    function bump(v) {
+      occ[v] = (occ[v] || 0) + 1;
+    }
+
+    while (i < vals.length) {
+      const c = vals[i];
+      if (c === expected) {
+        bump(c);
+        consumed.push(i);
+        expected++;
+        i++;
+      } else if (c === expected - 1 && expected > 1) {
+        // 直前に数えた数字の連続重複
+        bump(c);
+        consumed.push(i);
+        i++;
+      } else if (
+        special &&
+        special.type === "amaenbo" &&
+        !amaeUsed &&
+        special.number === expected
+      ) {
+        // 甘えん坊: 欠け数字を存在扱い（満額・iは進めない＝現カード再評価・カード非消費）
+        bump(expected);
+        amaeUsed = true;
+        expected++;
+      } else if (special && special.type === "yancha" && !yanchaUsed && c > expected) {
+        // やんちゃ: 欠け数字を無視して接続（基礎点から欠け数字を減点・カード非消費）
+        yanchaUsed = true;
+        yanchaMissing = expected;
+        expected++;
+      } else {
+        break;
+      }
+    }
+    // 末端補完: 甘えん坊で連番末尾の次を埋める（例 1..11+甘えん坊12）
+    if (special && special.type === "amaenbo" && !amaeUsed && special.number === expected) {
       bump(expected);
       amaeUsed = true;
       expected++;
-    } else if (special && special.type === "yancha" && !yanchaUsed && c > expected) {
-      // やんちゃ: 欠け数字を無視して接続（基礎点から欠け数字を減点）
-      yanchaUsed = true;
-      yanchaMissing = expected;
-      expected++;
-    } else {
-      break;
+    }
+
+    let n = expected - 1;
+    let base = (n * (n + 1)) / 2;
+    if (yanchaUsed) base -= yanchaMissing;
+
+    let wangeki = false;
+    if (n === 12) {
+      if (!special) {
+        wangeki = true; // 特殊不使用の12連番＝ワン撃（即勝利）
+      } else {
+        // 特殊カードでn=12到達は基礎点66（ワン撃不成立）。以降 重複ペナ/お昼寝を通常適用
+        base = 66;
+      }
+    }
+
+    let penalty = 0;
+    for (const k in occ) {
+      if (occ[k] >= 2) penalty += Number(k) * occ[k];
+    }
+    if (special && special.type === "ohirune") penalty = 0; // お昼寝: 重複ペナ無効
+
+    const total = base - penalty;
+    return {
+      n: n, base: base, penalty: penalty, total: total, wangeki: wangeki,
+      startIndex: consumed.length ? consumed[0] : -1,
+      scoredIndices: consumed,
+    };
+  }
+
+  // 起点候補: 値1のカード位置。特殊使用時は任意位置も候補（甘えん坊/やんちゃが1を補いうるため
+  // 現行as-builtを維持）。候補なし（1が無く特殊も無い）＝0点。
+  const starts = [];
+  for (let j = 0; j < vals.length; j++) {
+    if (vals[j] === 1) starts.push(j);
+  }
+  if (special) {
+    for (let j = 0; j < vals.length; j++) starts.push(j);
+    if (vals.length === 0) starts.push(0);
+  }
+  if (starts.length === 0) {
+    return { n: 0, base: 0, penalty: 0, total: 0, wangeki: false, startIndex: -1, scoredIndices: [] };
+  }
+
+  // すべての起点候補を試し total 最大を採用（複数1の起点選択＝最大得点採用）。
+  let best = null;
+  for (let k = 0; k < starts.length; k++) {
+    const r = scanFrom(starts[k]);
+    if (best === null || r.total > best.total || (r.total === best.total && r.n > best.n)) {
+      best = r;
     }
   }
-  // 末端補完: 甘えん坊で連番末尾の次を埋める（例 1..11+甘えん坊12）
-  if (special && special.type === "amaenbo" && !amaeUsed && special.number === expected) {
-    bump(expected);
-    amaeUsed = true;
-    expected++;
-  }
-
-  let n = expected - 1;
-  let base = (n * (n + 1)) / 2;
-  if (yanchaUsed) base -= yanchaMissing;
-
-  let wangeki = false;
-  if (n === 12) {
-    if (!special) {
-      wangeki = true; // 特殊不使用の12連番＝ワン撃（即勝利）
-    } else {
-      // 特殊カードでn=12到達は基礎点66（ワン撃不成立）。以降 重複ペナ/お昼寝を通常適用
-      base = 66;
-    }
-  }
-
-  let penalty = 0;
-  for (const k in occ) {
-    if (occ[k] >= 2) penalty += Number(k) * occ[k];
-  }
-  if (special && special.type === "ohirune") penalty = 0; // お昼寝: 重複ペナ無効
-
-  const total = base - penalty;
-  return { n: n, base: base, penalty: penalty, total: total, wangeki: wangeki };
+  return best;
 }
 
 // ---- ワン！精算: 各宣言 value==n で+5 / 不一致で-5 ----
