@@ -49,6 +49,21 @@
   .num-grid button { padding:12px 0; margin:0; }
   .tag { font-size:11px; background:#5a4433; padding:2px 6px; border-radius:6px; }
   .log { font-size:12px; opacity:.85; max-height:96px; overflow:auto; margin-top:6px; }
+  .sheet.howto { max-height:86vh; overflow-y:auto; overflow-x:hidden; text-align:left; }
+  .howto h2 { font-size:18px; margin:2px 0 8px; text-align:center; }
+  .howto details { background:var(--bg); border-radius:10px; padding:8px 10px; margin:7px 0; }
+  .howto summary { cursor:pointer; font-weight:bold; font-size:14px; list-style:none; }
+  .howto summary::-webkit-details-marker { display:none; }
+  .howto summary::before { content:"▸ "; color:var(--accent); }
+  .howto details[open] summary::before { content:"▾ "; }
+  .howto p, .howto li { font-size:13px; line-height:1.6; margin:5px 0; }
+  .howto ul { padding-left:18px; margin:5px 0; }
+  .howto .ex { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin:4px 0; }
+  .howto .ex .cc { display:inline-flex; min-width:22px; height:26px; align-items:center; justify-content:center;
+    background:var(--panel); border:1px solid #6b503c; border-radius:5px; font-size:12px; padding:0 4px; }
+  .howto .ex .cc.hl { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+  .howto .ptbl { display:flex; flex-wrap:wrap; gap:5px; margin:6px 0; }
+  .howto .ptbl span { font-size:12px; background:var(--bg); border-radius:6px; padding:3px 7px; white-space:nowrap; }
   .center { text-align:center; }
   .big { font-size:34px; }
   .breakdown { font-size:13px; line-height:1.6; }
@@ -239,6 +254,7 @@ function OnlineGame({ onExit }) {
   const [reveal, setReveal] = useState(null);
   const [toast, setToast] = useState("");
   const [now, setNow] = useState(Date.now());
+  const [showHelp, setShowHelp] = useState(false);
   const wsRef = useRef(null);
 
   useEffect(() => {
@@ -345,8 +361,12 @@ function OnlineGame({ onExit }) {
       </div>
       {isHost ? <div className="center"><button disabled={!lobby || lobby.players.length < 2} onClick={() => send({ type: "start" })}>ゲーム開始（{lobby ? lobby.players.length : 0}人）</button></div>
         : <div className="sub center">ホストの開始を待っています…</div>}
-      <div className="center"><button className="ghost" onClick={onExit}>← 退出</button></div>
+      <div className="center">
+        <button className="ghost" onClick={() => setShowHelp(true)}>📖 あそびかた</button>
+        <button className="ghost" onClick={onExit}>← 退出</button>
+      </div>
       {toast && <div className="panel center" style={{ color: "var(--accent)" }}>{toast}</div>}
+      {showHelp && <HowToPlay onClose={() => setShowHelp(false)} />}
     </div>;
   }
 
@@ -410,6 +430,9 @@ function OnlineGame({ onExit }) {
       <div className="log">{view.history.slice().reverse().slice(0, 12).map((h, i) => <div key={i}>{histText(h, names, cpuFlags)}</div>)}</div>
     </div>
     {toast && <div className="panel center" style={{ color: "var(--accent)", fontSize: 12 }}>{toast}</div>}
+    <button className="ghost" style={{ position: "fixed", right: 10, bottom: 10, zIndex: 9, fontSize: 18, padding: "6px 12px", borderRadius: "50%" }}
+      onClick={() => setShowHelp(true)} title="あそびかた">？</button>
+    {showHelp && <HowToPlay onClose={() => setShowHelp(false)} />}
   </div>;
 }
 const inpStyle = { width: "100%", padding: "9px", borderRadius: "8px", border: "1px solid #5a4433", background: "#2a1c14", color: "var(--ink)", fontSize: 14 };
@@ -443,6 +466,7 @@ function OnlineSpecial({ special, onDone, secLeft }) {
 
 function App() {
   const [screen, setScreen] = useState("title");
+  const [showHelp, setShowHelp] = useState(false);
   const [cfg, setCfg] = useState({ mode: "cpu", players: 2, cpu: 1, difficulty: "normal" });
   const [state, setState] = useState(null);
   const [names, setNames] = useState([]);
@@ -577,7 +601,9 @@ function App() {
       <div className="sub">記憶とブラフの連番構築カードゲーム</div>
       <div className="center" style={{ marginBottom: 8 }}>
         <button style={{ fontSize: 16 }} onClick={() => setScreen("online")}>🌐 オンライン対戦</button>
+        <button className="ghost" style={{ fontSize: 16 }} onClick={() => setShowHelp(true)}>📖 あそびかた</button>
       </div>
+      {showHelp && <HowToPlay onClose={() => setShowHelp(false)} />}
       <div className="panel">
         <div className="center"><b>ローカル対戦モード</b></div>
         <div className="center">
@@ -674,6 +700,10 @@ function App() {
       </div> : <div className="sub">{cpuFlags[me] ? names[me] + "（CPU）の手番…🤖" : names[me] + "の手番"}</div>}
     </div>
 
+    <button className="ghost" style={{ position: "fixed", right: 10, bottom: 10, zIndex: 9, fontSize: 18, padding: "6px 12px", borderRadius: "50%" }}
+      onClick={() => setShowHelp(true)} title="あそびかた">？</button>
+    {showHelp && <HowToPlay onClose={() => setShowHelp(false)} />}
+
     {reveal && <RevealModal reveal={reveal} names={names} cpuFlags={cpuFlags} onClose={() => setReveal(null)} />}
     {declaring && <DeclareFlow state={declaring.declState} names={names} cpuFlags={cpuFlags}
       difficulty={cfg.difficulty} onDone={declaring.onDone} />}
@@ -720,6 +750,92 @@ function RevealModal({ reveal, names, cpuFlags, onClose }) {
     </div>}
     <div className="center"><button onClick={onClose}>次へ</button></div>
   </div></div>;
+}
+
+// 例の場を小さなカードで図示（scored=true のカードだけ黄枠でハイライト）
+function ExRow({ cards, note }) {
+  return <div className="ex">
+    {cards.map((c, i) => <span key={i} className={"cc" + (c.hl ? " hl" : "")}>{c.v}</span>)}
+    <span style={{ fontSize: 12, marginLeft: 4 }}>= <b>{note}</b></span>
+  </div>;
+}
+
+// あそびかた（ルール説明モーダル）— GDD v0.5準拠。モバイル390pxで横スクロールなし・折りたたみ式。
+function HowToPlay({ onClose }) {
+  const P = [1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66]; // n=1..11 の基礎点
+  return <div className="modal" onClick={onClose}>
+    <div className="sheet howto" onClick={(e) => e.stopPropagation()}>
+      <h2>📖 あそびかた 🐕</h2>
+
+      <details open>
+        <summary>ゲームの目的</summary>
+        <p>累計 <b>150点</b> を最初に超えた最高得点者の勝ち。または <b>ワン撃</b>（1〜12を特殊カードなしで完全に並べる）で<b>即勝利</b>。</p>
+      </details>
+
+      <details>
+        <summary>カード</summary>
+        <ul>
+          <li>おしりカード <b>1〜12</b>（各2枚）</li>
+          <li>特殊カード <b>3種</b>（甘えん坊 / やんちゃ / お昼寝）</li>
+        </ul>
+      </details>
+
+      <details>
+        <summary>手番でできること（1つ選ぶ）</summary>
+        <ul>
+          <li><b>プレイ</b>: おしりカードを1枚、<b>裏向き</b>で場の右端に置く</li>
+          <li><b>公開</b>: 場を表にして得点計算（下記）</li>
+          <li><b>移動</b>: 場の裏向きカード1枚を好きな位置へ動かす（🪙トークン1消費・最初に2個）</li>
+        </ul>
+      </details>
+
+      <details>
+        <summary>⚠ いちばん大事なところ</summary>
+        <p>場のカードは<b>裏向き</b>。<b>値を知っているのは置いた本人だけ</b>です。<br />
+        誰が置いたか（枠の色）は全員に見えますが、数字は本人以外わかりません。記憶とブラフの勝負！</p>
+      </details>
+
+      <details open>
+        <summary>公開と得点</summary>
+        <p>場のどこかにある <b>1 を起点</b>に、右へ 1,2,3… と連番が続く分が得点。<b>1がなければ0点</b>。1の位置はどこでもよく、<b>起点より左のカードは無視</b>されます。</p>
+        <p>連番の長さ n の基礎点（= n×(n+1)÷2）:</p>
+        <div className="ptbl">
+          {P.map((pt, i) => <span key={i}>n{i + 1}=<b>{pt}</b></span>)}
+          <span>n12=<b>ワン撃🐕</b></span>
+        </div>
+        <p>同じ数字が連続で並ぶと <b>値×枚数</b> をマイナス。</p>
+        <p style={{ marginTop: 6 }}><b>例:</b></p>
+        <ExRow cards={[{ v: 1, hl: 1 }, { v: 2, hl: 1 }, { v: 3, hl: 1 }]} note="6点（1,2,3）" />
+        <ExRow cards={[{ v: 5 }, { v: 1, hl: 1 }, { v: 2, hl: 1 }, { v: 3, hl: 1 }]} note="6点（左の5は無視）" />
+        <ExRow cards={[{ v: 1, hl: 1 }, { v: 2, hl: 1 }, { v: 2, hl: 1 }, { v: 3, hl: 1 }, { v: 4, hl: 1 }]} note="6点（10−2×2）" />
+        <p style={{ fontSize: 12, opacity: .8 }}>※黄枠＝得点対象のカード。1が複数あるときは得点が最大になる1を起点にします。</p>
+      </details>
+
+      <details>
+        <summary>ワン！宣言</summary>
+        <p>公開のとき、全員が「連番が〇まで続く」と予想できます。<b>的中で+5点 / 外れで−5点</b>。裏向きのまま予想するので読みが大事。</p>
+      </details>
+
+      <details>
+        <summary>特殊カード（公開者のみ・公開後に1枚使える）</summary>
+        <ul>
+          <li><b>甘えん坊</b>: 欠けている数字1つを補完（満額・減点なし）</li>
+          <li><b>やんちゃ</b>: 欠けている数字1つを無視して接続（その数字ぶん減点）</li>
+          <li><b>お昼寝</b>: 今回の重複ペナルティを全て無効化</li>
+        </ul>
+        <p style={{ fontSize: 12, opacity: .8 }}>※特殊カードで n=12 にしてもワン撃にはなりません（66点扱い）。</p>
+      </details>
+
+      <details>
+        <summary>強制公開</summary>
+        <p>場が <b>12枚</b>になったら、12枚目を置いた人がその場で<b>強制的に公開</b>します。</p>
+      </details>
+
+      <div className="center" style={{ marginTop: 12 }}>
+        <button onClick={onClose}>とじる</button>
+      </div>
+    </div>
+  </div>;
 }
 
 function RulesShort() {
