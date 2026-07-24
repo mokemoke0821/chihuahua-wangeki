@@ -89,11 +89,11 @@
     const canReveal = legal.some(function (a) { return a.type === "reveal"; });
     const canMove = legal.some(function (a) { return a.type === "move"; });
 
-    // 期待得点（連番期待長 en から近似）で公開判断。難易度で閾値。
+    // 公開判断: 連番期待長 en の難易度別閾値。hardは短い連番でも早めに刈り取る（積極）、
+    // easyは長くなるまで待つ（消極）＝難易度で公開タイミングに明確な差が出る。
     const en = est.en;
-    const approxScore = (en * (en + 1)) / 2;
-    const thr = difficulty === "hard" ? 10 : difficulty === "normal" ? 13 : 16;
-    if (canReveal && approxScore >= thr && rowLen >= 3) return { type: "reveal" };
+    const enThr = difficulty === "hard" ? 3.0 : difficulty === "normal" ? 4.5 : 6.0;
+    if (canReveal && en >= enThr && rowLen >= 3) return { type: "reveal" };
     if (canReveal && rowLen >= 11) return { type: "reveal" }; // 12強制公開前に確保
 
     // プレイ優先: 連番の続き(expected)になる自札があれば出す、なければ小さい順
@@ -122,16 +122,20 @@
   }
 
   // ワン!宣言（公開前=裏向き。推定分布から的中確率pを計算し EV>0 かつ p>閾値 で宣言）
+  // 難易度で明確に差別化: easy=ほぼ宣言しない / normal=手堅く / hard=積極(自作連番が薄くても賭ける)
   function chooseDeclaration(view, aiIndex, difficulty) {
+    if (difficulty === "easy") return null; // easyはワン!をほぼ使わない（記憶/推理が雑）
     const est = estimate(view, aiIndex);
     const declaredN = Math.round(est.en);
     if (declaredN < 1) return null;
     // 的中確率の近似: 自分が置いた確定連番の割合が高いほど確信（自作連番ほど当てやすい）
     const p = Math.min(1, est.knownRun / Math.max(1, declaredN));
-    const ev = 5 * p - 5 * (1 - p); // = 10p - 5
-    const threshold = DECL_THRESHOLD[difficulty] || 0.62;
-    if (ev > 0 && p > threshold) {
-      return { player: aiIndex, value: declaredN };
+    // normal: 手堅く（的中確率が閾値超のときだけ）
+    if (p > DECL_THRESHOLD.normal) return { player: aiIndex, value: declaredN };
+    // hard: リスク許容が高くブラフ的に宣言（自作連番が1枚でもあり期待長2.3以上なら賭ける）
+    //   → normal より宣言頻度が明確に多くなる（難易度別の挙動差）
+    if (difficulty === "hard" && est.knownRun >= 1 && est.en >= 2.3 && p > DECL_THRESHOLD.hard) {
+      return { player: aiIndex, value: Math.max(2, declaredN) };
     }
     return null;
   }
