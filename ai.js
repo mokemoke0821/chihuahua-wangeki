@@ -25,8 +25,8 @@
     throw new Error("GameCore not found");
   }
 
-  // 難易度別のワン!宣言リスク許容（的中確率pの下限閾値）。easyは実質宣言しない。
-  const DECL_THRESHOLD = { easy: 0.99, normal: 0.62, hard: 0.46 };
+  // 難易度別のワン!宣言 的中確率p の下限閾値（EV=5(2p-1)>0 ⇔ p>0.5）。easyは宣言しない。
+  const WAN_P = { normal: 0.6, hard: 0.5 };
 
   // 未出現カードの残り分布（自分が見えている情報を全 butt 母数2から差し引く）。
   function unseenPool(view, aiIndex) {
@@ -50,13 +50,114 @@
     return { cnt: cnt, total: total };
   }
 
+  // ---- 信念推定（belief）: view のみから隠れ場札の値をサンプリングし終端nの分布を出す ----
+  // v0.6.0: ワン!宣言を「真の的中確率」で判断するための中核。決定論のため view から
+  // 導出した seed で mulberry32 を回す（同一 state → 同一サンプル → 同一決定＝再現性）。
+  function hashView(view, aiIndex, salt) {
+    let h = 2166136261 >>> 0;
+    function mix(x) { h ^= x >>> 0; h = Math.imul(h, 16777619) >>> 0; }
+    mix(aiIndex + 1); mix((salt || 0) + 7); mix(view.current + 3);
+    view.row.forEach(function (c) {
+      mix(c.id + 1); mix(c.placedBy + 1); mix((c.v != null ? c.v : 13) + 1);
+    });
+    view.players.forEach(function (p) { mix((p.score + 200)); mix(p.handCount + 1); mix(p.tokens + 1); });
+    mix(view.deckCount + 1); mix(view.discardCount + 1);
+    return h >>> 0 || 1;
+  }
+
+  // 未知プールを値の配列に展開（各値は残枚数ぶん）。
+  function poolArray(pool) {
+    const arr = [];
+    for (let v = 1; v <= 12; v++) for (let k = 0; k < (pool.cnt[v] || 0); k++) arr.push(v);
+    return arr;
+  }
+
+  // 未知の特殊カード（自分の手札にも捨て札にも無い＝他者手札/山札に潜在）を返す。
+  function unseenSpecials(view, aiIndex) {
+    const all = { amaenbo: 1, yancha: 1, ohirune: 1 };
+    const me = view.players[aiIndex];
+    (me && me.hand ? me.hand : []).forEach(function (c) { if (c.t === "special") all[c.s] = 0; });
+    (view.discard || []).forEach(function (c) { if (c.t === "special") all[c.s] = 0; });
+    return Object.keys(all).filter(function (s) { return all[s] > 0; });
+  }
+
+  // 場札のうち自分の既知値はそのまま、他者の伏せ札は未知プールから重複なし抽出で埋め、終端nの
+  // 分布を Monte Carlo で推定。ワン!は「特殊適用後のn」で精算されるため、公開者(view.current)が
+  // ギャップ埋め特殊(甘えん坊/やんちゃ)を保有する確率 q を推定し、延長後nを重み q で混ぜる。
+  function terminalNDist(view, aiIndex, rng, samples, modelSpecial) {
+    const GC = getCore();
+    const pool = unseenPool(view, aiIndex);
+    const knownVals = view.row.map(function (c) {
+      return (c.placedBy === aiIndex && c.v != null) ? c.v : null;
+    });
+    const hiddenPos = [];
+    knownVals.forEach(function (v, i) { if (v === null) hiddenPos.push(i); });
+    const basePool = poolArray(pool);
+    const S = samples || 160;
+
+    // 公開者がギャップ埋め特殊を保有・使用する確率 q（延長後nに重み付け）
+    let q = 0;
+    let fillers = [];
+    if (modelSpecial) {
+      const unseenSp = unseenSpecials(view, aiIndex).filter(function (s) { return s === "amaenbo" || s === "yancha"; });
+      const revealer = view.current;
+      let unseenSlots = 0;
+      view.players.forEach(function (p, i) { if (i !== aiIndex) unseenSlots += p.handCount; });
+      unseenSlots += (view.deckCount || 0);
+      const rHC = (view.players[revealer] && revealer !== aiIndex) ? view.players[revealer].handCount : 0;
+      const rPer = unseenSlots > 0 ? Math.min(1, rHC / unseenSlots) : 0;
+      // 少なくとも1枚のギャップ埋め特殊を公開者が持つ確率
+      let none = 1;
+      for (let i = 0; i < unseenSp.length; i++) none *= (1 - rPer);
+      q = 1 - none;
+      fillers = unseenSp;
+      // 公開者が自分自身なら手札から確定的に判定
+      if (revealer === aiIndex) {
+        const myFill = (view.players[aiIndex].hand || []).filter(function (c) { return c.t === "special" && (c.s === "amaenbo" || c.s === "yancha"); }).map(function (c) { return c.s; });
+        fillers = myFill; q = myFill.length ? 1 : 0;
+      }
+    }
+
+    const dist = {};
+    let sum = 0;
+    function add(n, w) { dist[n] = (dist[n] || 0) + w; sum += n * w; }
+    for (let s = 0; s < S; s++) {
+      const arr = basePool.slice();
+      const need = Math.min(hiddenPos.length, arr.length);
+      for (let i = 0; i < need; i++) {
+        const j = i + Math.floor(rng() * (arr.length - i));
+        const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+      }
+      const rowVals = knownVals.slice();
+      for (let k = 0; k < hiddenPos.length; k++) rowVals[hiddenPos[k]] = (k < need ? arr[k] : 1);
+      const plainN = GC.scoreRow(rowVals).n;
+      if (q > 0 && fillers.length) {
+        // 公開者が最適な特殊で連番を延長した場合のn（即時ギャップ n+1 を埋める近似）
+        let extN = plainN;
+        for (let f = 0; f < fillers.length; f++) {
+          const r = fillers[f] === "amaenbo"
+            ? GC.scoreRow(rowVals, { type: "amaenbo", number: plainN + 1 })
+            : GC.scoreRow(rowVals, { type: "yancha" });
+          if (r.n > extN) extN = r.n;
+        }
+        add(plainN, 1 - q);
+        add(extN, q);
+      } else {
+        add(plainN, 1);
+      }
+    }
+    let nStar = 0, best = -1;
+    for (const k in dist) { if (dist[k] > best) { best = dist[k]; nStar = Number(k); } }
+    return { nStar: nStar, p: best / S, dist: dist, mean: sum / S, samples: S };
+  }
+
   // view から「連番の期待到達長(en・小数)」と「自分が置いた既知で確定している連番長(knownRun)」を推定。
   // v0.4.1: 連番は場のどこかにある1を起点にする（起点より左は無視）。起点 start を全位置で試し、
   // en が最大になる起点を採用（core.js scoreRow の最大起点方式に整合）。起点が確定できない
   // 未知カードには残り分布から1である確率を織り込む（scoreRowと違い推定なので確率で評価）。
-  function estimate(view, aiIndex) {
+  function estimate(view, aiIndex, rowOverride) {
     const pool = unseenPool(view, aiIndex);
-    const row = view.row;
+    const row = rowOverride || view.row;
 
     // 起点 start（=連番の"1"の位置）から走査した期待長と既知連番長を返す。
     function scanFrom(start) {
@@ -99,9 +200,56 @@
     return best;
   }
 
+  // 移動アクション選択（v0.6.0）。自分が値を知る場札のみ対象＝leak無し。
+  //  - repair: 自分の既知札を動かして推定連番長 en が明確に伸びるなら動かす（normal/hard）
+  //  - disrupt: 相手が直後に高得点公開しそうな時、自分の既知札を末尾へ動かして連番を崩す（hard）
+  function chooseMove(view, aiIndex, difficulty, baseEn) {
+    if (difficulty === "easy") return null;
+    const me = view.players[aiIndex];
+    if (!me || me.tokens <= 0) return null;
+    const row = view.row;
+    if (row.length < 2) return null;
+    const myKnown = [];
+    row.forEach(function (c, i) { if (c.placedBy === aiIndex && c.v != null) myKnown.push(i); });
+    if (!myKnown.length) return null;
+
+    function withMoved(from, to) {
+      const r = row.slice();
+      const card = r.splice(from, 1)[0];
+      r.splice(to, 0, card);
+      return r;
+    }
+    // repair: 各既知札を「先頭」「推定連番末尾の直後」へ動かす候補のみ試す（浅い探索・cheap）
+    const targets = [0, Math.min(row.length - 1, Math.max(1, Math.round(baseEn)))];
+    let bestDelta = 0.4; // 無駄打ち防止マージン
+    let bestMove = null;
+    for (let a = 0; a < myKnown.length; a++) {
+      for (let t = 0; t < targets.length; t++) {
+        const from = myKnown[a], to = targets[t];
+        if (to === from) continue;
+        const e = estimate(view, aiIndex, withMoved(from, to)).en;
+        if (e - baseEn > bestDelta) { bestDelta = e - baseEn; bestMove = { type: "move", from: from, to: to }; }
+      }
+    }
+    if (bestMove) return bestMove;
+
+    // disrupt(hard): 場が育ち相手の公開が近い時、自分の連番寄与札を末尾へ退避して崩す
+    if (difficulty === "hard" && baseEn >= 4 && row.length >= 4) {
+      const from = myKnown[0];
+      const to = row.length - 1;
+      if (from !== to) {
+        const e = estimate(view, aiIndex, withMoved(from, to)).en;
+        // 崩して自分の推定が下がる=相手の見た目も崩れる（相手も同じ場を見る）→ 妨害成立
+        if (baseEn - e > 0.6) return { type: "move", from: from, to: to };
+      }
+    }
+    return null;
+  }
+
   // 手番アクション選択（必ず legal を返す・view経由のみ参照）
   function chooseAction(view, aiIndex, difficulty, seed, legal) {
     const est = estimate(view, aiIndex);
+    const en = est.en;
     const rowLen = view.row.length;
     const me = view.players[aiIndex];
     const hand = (me && me.hand) ? me.hand : [];
@@ -109,21 +257,36 @@
     const canReveal = legal.some(function (a) { return a.type === "reveal"; });
     const canMove = legal.some(function (a) { return a.type === "move"; });
 
-    // 公開判断: 連番期待長 en の難易度別閾値。hardは短い連番でも早めに刈り取る（積極）、
-    // easyは長くなるまで待つ（消極）＝難易度で公開タイミングに明確な差が出る。
-    const en = est.en;
-    const enThr = difficulty === "hard" ? 3.0 : difficulty === "normal" ? 4.5 : 6.0;
-    if (canReveal && en >= enThr && rowLen >= 3) return { type: "reveal" };
-    if (canReveal && rowLen >= 11) return { type: "reveal" }; // 12強制公開前に確保
+    // 0点公開回避: 場に1が有り得ない（既知1なし かつ 伏せ札0 or 未知プールに1が0）なら自発公開しない
+    const knownOne = view.row.some(function (c) { return c.placedBy === aiIndex && c.v === 1; });
+    const pool = unseenPool(view, aiIndex);
+    const hiddenCount = view.row.filter(function (c) { return !(c.placedBy === aiIndex && c.v != null); }).length;
+    const oneImpossible = !knownOne && (hiddenCount === 0 || (pool.cnt[1] || 0) === 0);
 
-    // プレイ優先: 連番の続き(expected)になる自札があれば出す、なければ小さい順
+    // 移動（repair/disrupt）を先に検討（プレイ可能でも改善が大きければ移動）
+    if (canMove) {
+      const mv = chooseMove(view, aiIndex, difficulty, en);
+      if (mv) return mv;
+    }
+
+    // 公開判断: まず安価な en で足切り（en<pre なら公開検討しない）。有望なら信念MCで厳密判定。
+    // en は「1がある確率」を過大評価しうるため、belief の mean n と P(n=0) で 0点公開を排除する。
+    const enPre = difficulty === "hard" ? 2.4 : difficulty === "normal" ? 3.0 : 4.0;
+    if (canReveal && !oneImpossible && rowLen >= 3 && en >= enPre) {
+      const rng = mulberry32(hashView(view, aiIndex, 202));
+      const d = terminalNDist(view, aiIndex, rng, 90, true); // 公開者=自分→自分の特殊込みで評価
+      const pZero = (d.dist[0] || 0) / d.samples;
+      const meanThr = difficulty === "hard" ? 2.7 : difficulty === "normal" ? 3.2 : 4.2;
+      // pZero を厳しめ（0.10）にして自発0点公開を明確に抑制（試合長とのバランスは計測で確認）
+      if (d.mean >= meanThr && pZero < 0.10) return { type: "reveal" };
+    }
+
+    // プレイ: 連番の続き(need)になる自札を優先、場が空なら1優先、他は小さい順
     if (plays.length > 0) {
-      const need = Math.floor(en) + 1; // 次に欲しい数字（近似）
-      let best = plays[0];
-      let bestScore = 1e9;
+      const need = Math.floor(en) + 1;
+      let best = plays[0], bestScore = 1e9;
       plays.forEach(function (a) {
         const v = hand[a.cardIndex].v;
-        // need に近い / 場が空なら1優先 / それ以外は小さいほど良い
         let sc;
         if (rowLen === 0) sc = Math.abs(v - 1);
         else if (v === need) sc = -100;
@@ -133,30 +296,22 @@
       return best;
     }
 
-    // 手札が全て特殊 → 移動(hardはブラフ的移動も) or 公開
-    if (canMove && rowLen >= 2) {
-      return { type: "move", from: rowLen - 1, to: 0 };
-    }
+    // 手札が全て特殊 → 移動 or 公開（0点でも強制的な選択肢しかなければ公開）
+    if (canMove && rowLen >= 2) return { type: "move", from: rowLen - 1, to: 0 };
     if (canReveal) return { type: "reveal" };
     return legal[0];
   }
 
-  // ワン!宣言（公開前=裏向き。推定分布から的中確率pを計算し EV>0 かつ p>閾値 で宣言）
-  // 難易度で明確に差別化: easy=ほぼ宣言しない / normal=手堅く / hard=積極(自作連番が薄くても賭ける)
+  // ワン!宣言（v0.6.0: 信念分布から終端nの最尤値n*と的中確率pを算出し、EV=5(2p-1)>0 で宣言）
+  // EV基準ちょうどは p>0.5。難易度で閾値を変える: easy=宣言せず / normal=p>0.6(安全側) / hard=p>0.5。
+  // p は「真の的中確率」なので、的中率≈pの平均に収束する（旧実装の代理pと違い実効的）。
   function chooseDeclaration(view, aiIndex, difficulty) {
-    if (difficulty === "easy") return null; // easyはワン!をほぼ使わない（記憶/推理が雑）
-    const est = estimate(view, aiIndex);
-    const declaredN = Math.round(est.en);
-    if (declaredN < 1) return null;
-    // 的中確率の近似: 自分が置いた確定連番の割合が高いほど確信（自作連番ほど当てやすい）
-    const p = Math.min(1, est.knownRun / Math.max(1, declaredN));
-    // normal: 手堅く（的中確率が閾値超のときだけ）
-    if (p > DECL_THRESHOLD.normal) return { player: aiIndex, value: declaredN };
-    // hard: リスク許容が高くブラフ的に宣言（自作連番が1枚でもあり期待長2.3以上なら賭ける）
-    //   → normal より宣言頻度が明確に多くなる（難易度別の挙動差）
-    if (difficulty === "hard" && est.knownRun >= 1 && est.en >= 2.3 && p > DECL_THRESHOLD.hard) {
-      return { player: aiIndex, value: Math.max(2, declaredN) };
-    }
+    if (difficulty === "easy") return null; // easyはワン!をほぼ使わない
+    const rng = mulberry32(hashView(view, aiIndex, 101));
+    const dist = terminalNDist(view, aiIndex, rng, difficulty === "hard" ? 200 : 160, true);
+    if (dist.nStar < 1) return null; // n*=0（=1が場に無い最尤）は宣言しても得しない
+    const thr = difficulty === "hard" ? WAN_P.hard : WAN_P.normal;
+    if (dist.p > thr) return { player: aiIndex, value: dist.nStar };
     return null;
   }
 
@@ -188,7 +343,8 @@
   }
 
   const AI = {
-    DECL_THRESHOLD: DECL_THRESHOLD,
+    WAN_P: WAN_P,
+    terminalNDist: terminalNDist,
     unseenPool: unseenPool,
     estimate: estimate,
     chooseAction: chooseAction,
