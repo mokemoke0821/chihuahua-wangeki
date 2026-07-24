@@ -9,6 +9,7 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="./core.js"></script>
 <script src="./ai.js"></script>
+<script src="./ai-strong.js"></script>
 <style>
   :root { --bg:#2a1c14; --panel:#3d2a1e; --accent:#e8a04a; --ink:#fbeede; --good:#7ecb6b; --bad:#e56b6b; --face:#c98a4b; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -49,6 +50,11 @@
   .num-grid button { padding:12px 0; margin:0; }
   .tag { font-size:11px; background:#5a4433; padding:2px 6px; border-radius:6px; }
   .log { font-size:12px; opacity:.85; max-height:96px; overflow:auto; margin-top:6px; }
+  .thinking-pill { position:fixed; left:50%; bottom:14px; transform:translateX(-50%); z-index:11;
+    background:var(--panel); border:1px solid var(--accent); color:var(--ink); padding:8px 16px;
+    border-radius:20px; font-size:13px; box-shadow:0 2px 10px rgba(0,0,0,.4); }
+  .spin { display:inline-block; animation:spin 0.9s linear infinite; }
+  @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
   .sheet.howto { max-height:86vh; overflow-y:auto; overflow-x:hidden; text-align:left; }
   .howto h2 { font-size:18px; margin:2px 0 8px; text-align:center; }
   .howto details { background:var(--bg); border-radius:10px; padding:8px 10px; margin:7px 0; }
@@ -76,6 +82,10 @@
 const { useState, useEffect, useRef } = React;
 const GC = window.GameCore;
 const AI = window.GameAI;
+const AIS = window.GameAIStrong;
+// 難易度別のAIモジュール（hard/鬼は探索型ai-strong、easy/normalはai.js）。
+const aiMod = (d) => (d === "hard" || d === "oni") ? AIS : AI;
+const DIFF_LABEL = { easy: "easy", normal: "normal", hard: "hard", oni: "鬼" };
 const SP_LABEL = { amaenbo: "甘えん坊", yancha: "やんちゃ", ohirune: "お昼寝" };
 const PCOLORS = ["#e8a04a", "#7ecb6b", "#6aa0e0", "#d07ad0"];
 function ownerBadge(placedBy, names, cpuFlags) {
@@ -156,7 +166,7 @@ function DeclareFlow({ state, names, cpuFlags, difficulty, onDone }) {
     if (idx >= n) { onDone(decls); return; }
     if (cpuFlags[idx]) {
       // CPU自動宣言（viewFor経由の推論のみ・真値カンニングなし）
-      const d = AI.chooseDeclaration(GC.viewFor(state, idx), idx, difficulty);
+      const d = aiMod(difficulty).chooseDeclaration(GC.viewFor(state, idx), idx, difficulty);
       const nd = d ? decls.concat([d]) : decls;
       const tmr = setTimeout(() => { setDecls(nd); setIdx(idx + 1); }, 350);
       return () => clearTimeout(tmr);
@@ -477,6 +487,7 @@ function App() {
   const [specialing, setSpecialing] = useState(null); // 公開者の特殊カード選択フェーズ
   const [passGate, setPassGate] = useState(false); // ホットシートのパス画面
   const [logOpen, setLogOpen] = useState(true); // アクション履歴の開閉
+  const [thinking, setThinking] = useState(false); // 探索型CPUの思考中スピナー
   const seedRef = useRef(1);
   const stats = useRef(loadStats());
 
@@ -500,17 +511,31 @@ function App() {
     setScreen("game");
   }
 
-  // CPU手番の自動進行
+  // CPU手番の自動進行。hard/鬼は探索型のため非同期(chooseActionAsync)で実行し、
+  // 探索中は逐次yieldするのでUIはフリーズしない。思考中はスピナーを表示。
   useEffect(() => {
     if (screen !== "game" || !state || state.finished) return;
     if (declaring || reveal || specialing) return;
     if (!cpuFlags[state.current]) return;
+    let cancelled = false;
+    const ai = state.current;
+    const diff = cfg.difficulty;
+    const view = GC.viewFor(state, ai);
+    const legal = GC.legalActions(state);
+    const strong = (diff === "hard" || diff === "oni");
     const tmr = setTimeout(() => {
-      const ai = state.current;
-      const act = AI.chooseAction(GC.viewFor(state, ai), ai, cfg.difficulty, seedRef.current, GC.legalActions(state));
-      doAction(act);
-    }, 620);
-    return () => clearTimeout(tmr);
+      if (strong) {
+        setThinking(true);
+        AIS.chooseActionAsync(view, ai, diff).then((act) => {
+          setThinking(false);
+          if (!cancelled) doAction(act);
+        }).catch(() => { setThinking(false); });
+      } else {
+        const act = AI.chooseAction(view, ai, diff, seedRef.current, legal);
+        if (!cancelled) doAction(act);
+      }
+    }, strong ? 120 : 620);
+    return () => { cancelled = true; clearTimeout(tmr); };
   }, [screen, state, declaring, reveal, specialing, cpuFlags]);
 
   function applyAndSet(action) {
@@ -557,7 +582,7 @@ function App() {
           if (cpuFlags[revealer]) {
             // CPU: 公開後=表向きの確定row値とhandで最善の特殊を選択（強制公開でも一貫）
             const rowVals = revealState.row.map((c) => c.v);
-            const sp = AI.chooseSpecial(rowVals, revealState.players[revealer].hand, cfg.difficulty);
+            const sp = aiMod(cfg.difficulty).chooseSpecial(rowVals, revealState.players[revealer].hand, cfg.difficulty);
             applyAndSet(Object.assign({}, action, { declarations: decls, special: sp }));
             return;
           }
@@ -614,7 +639,8 @@ function App() {
           <div>CPU人数</div>
           {[1, 2, 3].map((k) => <button key={k} className={cfg.cpu === k ? "" : "ghost"} onClick={() => setCfg({ ...cfg, cpu: k })}>{k}体</button>)}
           <div style={{ marginTop: 8 }}>難易度</div>
-          {["easy", "normal", "hard"].map((d) => <button key={d} className={cfg.difficulty === d ? "" : "ghost"} onClick={() => setCfg({ ...cfg, difficulty: d })}>{d}</button>)}
+          {["easy", "normal", "hard", "oni"].map((d) => <button key={d} className={cfg.difficulty === d ? "" : "ghost"} onClick={() => setCfg({ ...cfg, difficulty: d })}>{DIFF_LABEL[d]}</button>)}
+          {cfg.difficulty === "oni" && <div className="sub" style={{ marginTop: 4 }}>🔥 鬼＝本気で強い（探索型AI・思考に少し時間がかかります）</div>}
         </div> : <div className="center" style={{ marginTop: 10 }}>
           <div>人数</div>
           {[2, 3, 4].map((k) => <button key={k} className={cfg.players === k ? "" : "ghost"} onClick={() => setCfg({ ...cfg, players: k })}>{k}人</button>)}
@@ -703,6 +729,7 @@ function App() {
     <button className="ghost" style={{ position: "fixed", right: 10, bottom: 10, zIndex: 9, fontSize: 18, padding: "6px 12px", borderRadius: "50%" }}
       onClick={() => setShowHelp(true)} title="あそびかた">？</button>
     {showHelp && <HowToPlay onClose={() => setShowHelp(false)} />}
+    {thinking && <div className="thinking-pill"><span className="spin">🐕</span> {DIFF_LABEL[cfg.difficulty]}CPU 思考中…</div>}
 
     {reveal && <RevealModal reveal={reveal} names={names} cpuFlags={cpuFlags} onClose={() => setReveal(null)} />}
     {declaring && <DeclareFlow state={declaring.declState} names={names} cpuFlags={cpuFlags}

@@ -15,6 +15,14 @@
 const path = require("path");
 const GC = require(path.join(__dirname, "..", "core.js"));
 const AI = require(path.join(__dirname, "..", "ai.js"));
+const AIS = require(path.join(__dirname, "..", "ai-strong.js"));
+// hard/鬼 は探索型(ai-strong)、easy/normal はヒューリスティック(ai.js)。
+function aiFor(diff) { return (diff === "hard" || diff === "oni") ? AIS : AI; }
+// sim用の探索予算（実機より小さくして大量試合を回す。hard<oni で強さ順序を維持）。
+// CLI --K/--D を渡すと全難易度をその値に固定（単一難易度テスト用）。
+const SIM_BUDGET = { hard: { K: 4, D: 2 }, oni: { K: 22, D: 2 } };
+let STRONG_OPTS = null;
+function optsFor(diff) { return STRONG_OPTS || SIM_BUDGET[diff] || null; }
 
 const DEFAULT_MAX_ROUNDS = 500; // 指示書規定の打ち切り。--maxRounds で診断用に上書き可。
 
@@ -28,7 +36,7 @@ function parseArgs(argv) {
     const m = s.match(/^--([a-zA-Z]+)=(.+)$/);
     if (!m) return;
     const k = m[1], v = m[2];
-    if (k === "games" || k === "players" || k === "seed" || k === "maxRounds") a[k] = parseInt(v, 10);
+    if (k === "games" || k === "players" || k === "seed" || k === "maxRounds" || k === "K" || k === "D") a[k] = parseInt(v, 10);
     else if (k === "difficulty") a.difficulty = v;
     else if (k === "target" || k === "wanReward" || k === "wanPenalty" || k === "moveTokens") rules[k] = parseInt(v, 10);
     else if (k === "forbidZeroReveal" || k === "napBoost") rules[k] = (v === "true" || v === "1");
@@ -81,7 +89,7 @@ function playGame(seed, players, diffs, maxRounds, rules) {
       const hasAlt = legal.some(function (a) { return a.type === "play" || a.type === "move"; });
       if (hasAlt) legal = legal.filter(function (a) { return a.type !== "reveal"; });
     }
-    const action = AI.chooseAction(GC.viewFor(state, cur), cur, diffs[cur], seed, legal);
+    const action = aiFor(diffs[cur]).chooseAction(GC.viewFor(state, cur), cur, diffs[cur], seed, legal, optsFor(diffs[cur]));
 
     // 違法手検証（型が legal に含まれるか）
     if (!action || !legal.some(function (a) { return a.type === action.type; })) {
@@ -106,12 +114,12 @@ function playGame(seed, players, diffs, maxRounds, rules) {
       // 全員のワン！宣言（各自 viewFor 経由の推論のみ）
       const decls = [];
       for (let i = 0; i < players; i++) {
-        const d = AI.chooseDeclaration(GC.viewFor(revealState, i), i, diffs[i]);
+        const d = aiFor(diffs[i]).chooseDeclaration(GC.viewFor(revealState, i), i, diffs[i]);
         if (d) decls.push(d);
       }
       // 公開者の特殊カード（公開後=表向きの確定row値で最善選択）
       const rowVals = revealState.row.map(function (c) { return c.v; });
-      const special = AI.chooseSpecial(rowVals, revealState.players[cur].hand, diffs[cur]);
+      const special = aiFor(diffs[cur]).chooseSpecial(rowVals, revealState.players[cur].hand, diffs[cur]);
 
       res = GC.applyAction(state, Object.assign({}, action, { declarations: decls, special: special }));
 
@@ -324,6 +332,8 @@ function runMatchup(games, diffs, seed, maxRounds) {
 
 function main() {
   const a = parseArgs(process.argv);
+  // 探索型AIのsim予算（--K/--D で上書き。deadlineMs は渡さない＝決定化数で決定論）。
+  if (a.K || a.D) STRONG_OPTS = { K: a.K || undefined, D: a.D != null ? a.D : undefined };
   // マッチアップモード: --matchup=hard,normal（各席の難易度・カンマ区切り）
   const mArg = process.argv.slice(2).find(function (s) { return s.indexOf("--matchup=") === 0; });
   if (mArg) {
