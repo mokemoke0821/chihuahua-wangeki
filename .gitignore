@@ -5,3 +5,5 @@ server/.venv/
 __pycache__/
 *.pyc
 server/db.sqlite3
+worker/.wrangler/
+worker/node_modules/

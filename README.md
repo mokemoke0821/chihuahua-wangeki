@@ -45,6 +45,22 @@
 
 **設計原則**: UI・CPU AI は core の API のみ経由で状態遷移（直接 state 改変禁止）。state は不変更新。`newGame(seed, playerCount)` で決定論再現可能。
 
+## オンライン対戦アーキテクチャ（v0.3〜v0.4）
+
+| 構成 | 位置づけ |
+|------|---------|
+| `worker/` (Cloudflare Workers + Durable Objects) | **本番の権威サーバー**。1ルーム=1 DO・core.js を権威ロジックに流用・各クライアントへ `view_for(state,i)` のみ配信（値の隠蔽をサーバーで構造保証）・Hibernation/Alarms/SQLite storage永続化。GitHub Pages(https)から wss 直接続。無料枠 |
+| `server/` (Django + Channels) | **ローカル学習資産**（Phase 2a）。同一プロトコル・view_for設計の Python 実装。本番はCloudflareへ移行したため、学習/参照用としてrepoに残置（本番運用しない） |
+
+- **オンライン対戦**: Pages版の「🌐オンライン対戦」→ Cloudflare Worker(wss)へ接続。ローカル対戦（CPU/ホットシート）はサーバー不要で従来どおり動作。
+- **ローカル開発**: `cd worker && npx wrangler dev`（Miniflareでポート8787・認証不要）。クライアントは `ws://127.0.0.1:8787/ws/room/` を既定に。
+
+```
+# 権威ロジック単体テスト（core.js・Python版とクロス言語一致）
+node test/core.test.js
+cd server && .venv/Scripts/python.exe manage.py test game
+```
+
 ## テスト
 
 ```

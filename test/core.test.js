@@ -199,5 +199,20 @@ t("history: 公開後は値が公開情報として記録される", function ()
   assert.ok(typeof rev.result.total === "number", "得点結果も記録");
 });
 
+t("state永続化: JSON round-trip後もapplyAction/viewFor継続可能（DO storage前提）", function () {
+  let s = GC.newGame(2024, 2);
+  s = GC.applyAction(s, GC.legalActions(s).find((a) => a.type === "play")).state;
+  s = GC.applyAction(s, GC.legalActions(s).find((a) => a.type === "play")).state;
+  const restored = JSON.parse(JSON.stringify(s)); // 保存→復元相当
+  const legal = GC.legalActions(restored);
+  assert.ok(legal.length > 0, "復元後にlegalActions");
+  const res = GC.applyAction(restored, legal.find((a) => a.type === "play") || legal[0]);
+  assert.ok(!res.events.some((e) => e.type === "error"), "復元後applyActionがエラーなく進行");
+  const v = GC.viewFor(res.state, 0);
+  assert.ok(Array.isArray(v.row) && Array.isArray(v.players), "復元後viewForが機能");
+  // 元stateが破壊されていない（不変更新の保持）
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(s)), restored, "元stateは不変");
+});
+
 console.log("\n== 結果: " + pass + " PASS / " + fail + " FAIL ==");
 process.exit(fail === 0 ? 0 : 1);

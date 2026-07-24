@@ -208,10 +208,21 @@ function SpecialFlow({ state, revealer, specials, names, onDone }) {
 // OnlineGame — 🌐オンライン対戦（Django Channels 権威サーバーと WebSocket 通信）
 // サーバーの view(view_for) メッセージ駆動で盤面を描画。ローカルcore.jsは呼ばない。
 // ============================================================================
+// 本番: Cloudflare Workers + Durable Objects（デプロイ後に確定URLへ更新）。
+// ローカル開発時は入力欄で ws://127.0.0.1:8787/ws/room/ に切替可。
+const PROD_WS = "wss://chihuahua-wangeki.mokemoke0821.workers.dev/ws/room/";
 function wsBase() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const host = location.host || "localhost:8000";
-  return proto + "://" + host + "/ws/room/";
+  // Pages(https)からは本番wss。localhost配信時はローカルWorker(8787)を既定に。
+  if (location.hostname === "localhost" || location.hostname === "127.0.0.1") {
+    return "ws://127.0.0.1:8787/ws/room/";
+  }
+  return PROD_WS;
+}
+function randCode() {
+  const s = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let c = "";
+  for (let i = 0; i < 5; i++) c += s[Math.floor(Math.random() * s.length)];
+  return c;
 }
 function OnlineGame({ onExit }) {
   const [phase, setPhase] = useState("setup"); // setup|lobby|game
@@ -266,17 +277,23 @@ function OnlineGame({ onExit }) {
         if (m.phase === "play") { setWan(null); setSpecial(null); setWanDone(false); } break;
       case "wan_phase": setWan({ revealer: m.revealer, deadline: m.deadline, responded: [] }); setWanDone(false); setSpecial(null); setPhase("game"); break;
       case "wan_progress": setWan((w) => w ? { ...w, responded: m.responded, total: m.total } : w); break;
-      case "special_phase": setSpecial({ revealer: m.revealer, deadline: m.deadline, rowCards: m.rowCards }); setWan(null); break;
+      case "special_phase": setSpecial({ revealer: m.revealer, deadline: m.deadline, rowCards: m.rowCards, heldSpecials: m.heldSpecials }); setWan(null); break;
       case "reveal_result": setReveal(m); setWan(null); setSpecial(null); break;
       case "gameover": setToast(m.reason === "abandoned" ? "流局（人数不足）" : "ゲーム終了"); break;
       case "player_disconnected": setToast("席" + (m.seat + 1) + " 切断（" + m.graceSec + "秒以内に復帰可）"); break;
       case "player_reconnected": setToast("席" + (m.seat + 1) + " 復帰"); break;
-      case "error": setToast("⚠ " + (m.message || m.code)); break;
+      case "error":
+        if (m.code === "code_taken") { doCreate(); break; } // コード衝突→別コードで再作成
+        setToast("⚠ " + (m.message || m.code)); break;
       default: break;
     }
   }
 
-  function doCreate() { connect("AAAAA", null, (ws) => ws.send(JSON.stringify({ type: "create_room", name: name || "P1" }))); }
+  function doCreate() {
+    // DOは 1コード=1部屋。クライアントがコードを採番して接続→create_room。
+    const code = randCode();
+    connect(code, null, (ws) => ws.send(JSON.stringify({ type: "create_room", name: name || "P1" })));
+  }
   function doJoin() {
     const code = (joinCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
     if (code.length !== 5) { setToast("5文字のコードを入力"); return; }
@@ -399,9 +416,12 @@ const inpStyle = { width: "100%", padding: "9px", borderRadius: "8px", border: "
 
 function OnlineSpecial({ special, onDone, secLeft }) {
   const [amae, setAmae] = useState(false);
-  const rowVals = special.rowCards.map((c) => c.v);
+  const rowVals = (special.rowCards || []).map((c) => c.v);
   const base = GC.scoreRow(rowVals);
   const pv = (sp) => GC.scoreRow(rowVals, sp).total;
+  // サーバーが送る heldSpecials（公開者の実保有）でボタンを絞る＝不正選択不能（権威と二重防御）
+  const held = special.heldSpecials || [];
+  const has = (n) => held.includes(n);
   if (amae) return <div className="modal"><div className="sheet">
     <div className="center"><b>甘えん坊</b>: 欠け数字を選択（残り{secLeft(special.deadline)}秒）</div>
     <div className="num-grid">{Array.from({ length: 12 }, (_, i) => i + 1).map((v) => <button key={v} onClick={() => onDone({ type: "amaenbo", number: v })}>{v}<br /><span style={{ fontSize: 10 }}>{pv({ type: "amaenbo", number: v })}</span></button>)}</div>
@@ -409,12 +429,13 @@ function OnlineSpecial({ special, onDone, secLeft }) {
   </div></div>;
   return <div className="modal"><div className="sheet">
     <div className="center"><b>特殊カード</b>（任意・残り{secLeft(special.deadline)}秒）</div>
-    <div className="row-cards center" style={{ justifyContent: "center", margin: "8px 0" }}>{special.rowCards.map((c, i) => <div key={i} className="card">{c.v}</div>)}</div>
+    <div className="row-cards center" style={{ justifyContent: "center", margin: "8px 0" }}>{(special.rowCards || []).map((c, i) => <div key={i} className="card">{c.v}</div>)}</div>
     <div className="sub center">現在 {base.total}点（n={base.n}）</div>
     <div className="center">
-      <button onClick={() => onDone({ type: "ohirune" })}>お昼寝<br /><span style={{ fontSize: 10 }}>{pv({ type: "ohirune" })}</span></button>
-      <button onClick={() => onDone({ type: "yancha" })}>やんちゃ<br /><span style={{ fontSize: 10 }}>{pv({ type: "yancha" })}</span></button>
-      <button onClick={() => setAmae(true)}>甘えん坊…</button>
+      {has("ohirune") && <button onClick={() => onDone({ type: "ohirune" })}>お昼寝<br /><span style={{ fontSize: 10 }}>{pv({ type: "ohirune" })}</span></button>}
+      {has("yancha") && <button onClick={() => onDone({ type: "yancha" })}>やんちゃ<br /><span style={{ fontSize: 10 }}>{pv({ type: "yancha" })}</span></button>}
+      {has("amaenbo") && <button onClick={() => setAmae(true)}>甘えん坊…</button>}
+      {held.length === 0 && <div className="sub">使える特殊カードなし</div>}
     </div>
     <div className="center" style={{ marginTop: 8 }}><button className="ghost" onClick={() => onDone(null)}>使わない</button></div>
   </div></div>;

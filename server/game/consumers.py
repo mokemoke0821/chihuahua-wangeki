@@ -249,6 +249,7 @@ class GameConsumer(AsyncJsonWebsocketConsumer):
         # 【payload隠蔽】表向きの場(採点対象=全カード値)は公開者チャンネルにのみ送る。
         # 他プレイヤーには値を含まない待機通知のみ（group_send で全員に生rowCardsを送らない）。
         flip = [{"v": c["v"], "placedBy": c["placedBy"], "id": c["id"]} for c in w["view_state"]["row"]]
+        held = [c["s"] for c in rp["hand"] if c["t"] == "special"]  # 公開者の保有特殊種
         for p in room.players:
             if not (p["connected"] and p["channel"]):
                 continue
@@ -256,6 +257,7 @@ class GameConsumer(AsyncJsonWebsocketConsumer):
                        "deadline": int(deadline * 1000), "seconds": SPECIAL_DEADLINE_SEC}
             if p["seat"] == revealer:
                 payload["rowCards"] = flip  # 公開者だけが採点対象の場を見て選ぶ
+                payload["heldSpecials"] = held  # 保有分だけUIにボタンを出す
             await self.channel_layer.send(p["channel"], {"type": "room.broadcast", "payload": payload})
         asyncio.create_task(self._special_timer(room.code, deadline))
 
@@ -276,8 +278,10 @@ class GameConsumer(AsyncJsonWebsocketConsumer):
             return
         sp = room.special
         room.special = None
+        # 権威: 実際に保有する特殊カードのみ適用可（core.pyは保有検証しない設計＝ここで照合）
+        held = [c["s"] for c in room.state["players"][self.seat]["hand"] if c["t"] == "special"]
         special = None
-        if card in ("amaenbo", "yancha", "ohirune"):
+        if card in ("amaenbo", "yancha", "ohirune") and card in held:
             special = {"type": card}
             if card == "amaenbo" and isinstance(number, int):
                 special["number"] = number
