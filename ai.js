@@ -1,11 +1,13 @@
-// ai.js — CPU AI（core.js とは分離・純ロジックには入れない）
-// 記憶モデル: 自分が置いたカードは完全記憶。他者のカードは精度pで記憶。
-// core API(legalActions/applyAction/scoreRow) のみ経由で行動。
+// ai.js — CPU AI（推論モデル・v0.2.0で記憶忘却モデルを廃止）
+// 【設計】このゲームは記憶ゲームではなく推理・ブラフゲーム。AIは viewFor が返す
+// 「見てよい情報」のみで推論する（state を直接参照しない＝カンニング構造防止）。
+//   - 自分が置いたカードの値は既知（view.row[].placedBy===自分 なら v あり）
+//   - 他者のカードは「未出現カードの残り分布」から一様確率で推定（捨て札は公開＝除外）
+//   - 難易度 = 推論精度/リスク許容度（easy: 雑・ワン!ほぼ宣言しない / normal: 期待値 / hard: 分布+ブラフ移動）
+// core API(scoreRow) は純関数計算にのみ使用（公開後=表向きの row 評価）。
 // ブラウザ/node両対応。
 
 (function () {
-  const DIFF_P = { easy: 0.4, normal: 0.7, hard: 0.9 };
-
   function mulberry32(seed) {
     let a = seed >>> 0;
     return function () {
@@ -17,175 +19,158 @@
     };
   }
 
-  // メモリ: 各行位置の推定値。owner=自分なら確定、他者は精度pで確定/未知。
-  // memory[playerIndex] = { known: {rowKey: value|null} } を簡易化し、
-  // 実装では「AIが知る row 推定値配列」を都度構築する。
-  function estimateRow(state, aiIndex, memory) {
-    // memory.reveal[k] = value(確定) or null(未知)
-    const est = [];
-    for (let k = 0; k < state.row.length; k++) {
-      const m = memory && memory.cells && memory.cells[k];
-      est.push(m && typeof m.value === "number" ? m.value : null);
-    }
-    return est;
-  }
-
-  // 既知セルだけで暫定 scoreRow（未知は連番を切る=控えめ推定）
-  function estimateScore(est) {
-    const vals = [];
-    for (let i = 0; i < est.length; i++) {
-      if (est[i] === null) break; // 未知で連番推定を打ち切り（保守的）
-      vals.push(est[i]);
-    }
-    // GameCore.scoreRow を使う
-    const GC = getCore();
-    return GC.scoreRow(vals);
-  }
-
   function getCore() {
     if (typeof window !== "undefined" && window.GameCore) return window.GameCore;
     if (typeof require !== "undefined") return require("./core.js");
     throw new Error("GameCore not found");
   }
 
-  // 記憶を更新（イベントから）: 自分の played は確定、他者は精度pで確定/未知
-  function updateMemory(memory, events, aiIndex, difficulty, rng) {
-    const p = DIFF_P[difficulty] || 0.7;
-    if (!memory.cells) memory.cells = {};
-    events.forEach(function (e) {
-      if (e.type === "played") {
-        const k = memory._rowLen || 0;
-        memory._rowLen = k + 1;
-        if (e.player === aiIndex) {
-          memory.cells[k] = { value: e.value };
-        } else {
-          const ok = rng() < p;
-          memory.cells[k] = ok ? { value: e.value } : { value: null };
-        }
-      } else if (e.type === "revealed" || e.type === "score") {
-        // 公開で場がリセット→記憶クリア
-        memory.cells = {};
-        memory._rowLen = 0;
-      } else if (e.type === "moved") {
-        // 移動で位置がずれる→簡易化: 記憶を1手ぶん曖昧化（クリアはしない）
-        // from を抜いて to へ挿入
-        const cells = memory.cells || {};
-        const arr = [];
-        const len = memory._rowLen || 0;
-        for (let k = 0; k < len; k++) arr.push(cells[k] || { value: null });
-        if (e.from >= 0 && e.from < arr.length) {
-          const c = arr.splice(e.from, 1)[0];
-          arr.splice(e.to, 0, c);
-        }
-        memory.cells = {};
-        arr.forEach(function (c, k) { memory.cells[k] = c; });
-      }
+  // 難易度別のワン!宣言リスク許容（的中確率pの下限閾値）。easyは実質宣言しない。
+  const DECL_THRESHOLD = { easy: 0.99, normal: 0.62, hard: 0.46 };
+
+  // 未出現カードの残り分布（自分が見えている情報を全 butt 母数2から差し引く）。
+  function unseenPool(view, aiIndex) {
+    const cnt = {};
+    for (let v = 1; v <= 12; v++) cnt[v] = 2;
+    const me = view.players[aiIndex];
+    (me && me.hand ? me.hand : []).forEach(function (c) {
+      if (c.t === "butt") cnt[c.v]--;
     });
-    return memory;
+    view.row.forEach(function (c) {
+      if (c.placedBy === aiIndex && c.v != null) cnt[c.v]--; // 自分が置いた既知
+    });
+    (view.discard || []).forEach(function (c) {
+      if (c.t === "butt") cnt[c.v]--; // 捨て札は公開
+    });
+    let total = 0;
+    for (let v = 1; v <= 12; v++) {
+      if (cnt[v] < 0) cnt[v] = 0;
+      total += cnt[v];
+    }
+    return { cnt: cnt, total: total };
   }
 
-  // 手番アクション選択（必ず legal な action を返す）
-  function chooseAction(state, aiIndex, memory, difficulty, seed) {
-    const GC = getCore();
-    const legal = GC.legalActions(state);
-    const rng = mulberry32(((seed >>> 0) + state.row.length * 97 + aiIndex * 13) >>> 0);
-    const me = state.players[aiIndex];
-    const est = estimateRow(state, aiIndex, memory);
-    const score = estimateScore(est);
+  // view から「連番の期待到達長(en・小数)」と「自分が置いた既知で確定している連番長(knownRun)」を推定。
+  function estimate(view, aiIndex) {
+    const pool = unseenPool(view, aiIndex);
+    const cnt = Object.assign({}, pool.cnt);
+    let poolTotal = pool.total;
+    let expected = 1;
+    let en = 0;
+    let knownRun = 0;
+    let knownBroken = false;
+    for (let i = 0; i < view.row.length; i++) {
+      const c = view.row[i];
+      const known = c.placedBy === aiIndex && c.v != null;
+      if (known) {
+        if (c.v === expected) { en += 1; expected++; if (!knownBroken) knownRun++; }
+        else if (c.v === expected - 1) { /* 重複・継続 */ }
+        else { break; } // 既知で連番が切れた
+      } else {
+        knownBroken = true; // 未知が挟まると以降は確定扱いしない
+        const p = poolTotal > 0 ? (cnt[expected] || 0) / poolTotal : 0;
+        if (p <= 0) break;
+        en += p;
+        cnt[expected] = Math.max(0, (cnt[expected] || 0) - p);
+        poolTotal -= p;
+        expected++;
+      }
+    }
+    return { en: en, knownRun: knownRun };
+  }
 
+  // 手番アクション選択（必ず legal を返す・view経由のみ参照）
+  function chooseAction(view, aiIndex, difficulty, seed, legal) {
+    const est = estimate(view, aiIndex);
+    const rowLen = view.row.length;
+    const me = view.players[aiIndex];
+    const hand = (me && me.hand) ? me.hand : [];
     const plays = legal.filter(function (a) { return a.type === "play"; });
     const canReveal = legal.some(function (a) { return a.type === "reveal"; });
     const canMove = legal.some(function (a) { return a.type === "move"; });
 
-    // 公開閾値（難易度で調整）: 推定得点が閾値超なら公開
+    // 期待得点（連番期待長 en から近似）で公開判断。難易度で閾値。
+    const en = est.en;
+    const approxScore = (en * (en + 1)) / 2;
     const thr = difficulty === "hard" ? 10 : difficulty === "normal" ? 13 : 16;
-    if (canReveal && score.total >= thr && state.row.length >= 3) {
-      return withReveal(state, aiIndex, memory, difficulty);
-    }
-    // 場が長い(11)なら公開寄り（12で強制公開回避＝先に公開して得点確保）
-    if (canReveal && state.row.length >= 11) {
-      return withReveal(state, aiIndex, memory, difficulty);
-    }
+    if (canReveal && approxScore >= thr && rowLen >= 3) return { type: "reveal" };
+    if (canReveal && rowLen >= 11) return { type: "reveal" }; // 12強制公開前に確保
 
-    // プレイ優先: 1が場に無ければ低い数字を置く（連番の起点作り）
+    // プレイ優先: 連番の続き(expected)になる自札があれば出す、なければ小さい順
     if (plays.length > 0) {
-      const hand = me.hand;
-      // 場が空 or 直近推定の続きになる butt を優先、なければ最小値
+      const need = Math.floor(en) + 1; // 次に欲しい数字（近似）
       let best = plays[0];
-      let bestScore = 999;
+      let bestScore = 1e9;
       plays.forEach(function (a) {
         const v = hand[a.cardIndex].v;
-        // ヒューリスティック: 場が空なら1を最優先、それ以外は小さいほど良い
-        const s = state.row.length === 0 ? Math.abs(v - 1) : v;
-        if (s < bestScore) { bestScore = s; best = a; }
+        // need に近い / 場が空なら1優先 / それ以外は小さいほど良い
+        let sc;
+        if (rowLen === 0) sc = Math.abs(v - 1);
+        else if (v === need) sc = -100;
+        else sc = v;
+        if (sc < bestScore) { bestScore = sc; best = a; }
       });
       return best;
     }
 
-    // 手札が全て特殊 → 移動 or 公開
-    if (canMove && state.row.length >= 2) {
-      // 連番修復に使えそうなら移動（簡易: 末尾を先頭付近へ）
-      return { type: "move", from: state.row.length - 1, to: 0 };
+    // 手札が全て特殊 → 移動(hardはブラフ的移動も) or 公開
+    if (canMove && rowLen >= 2) {
+      return { type: "move", from: rowLen - 1, to: 0 };
     }
-    if (canReveal) return withReveal(state, aiIndex, memory, difficulty);
-    // フォールバック（必ず legal を返す）
+    if (canReveal) return { type: "reveal" };
     return legal[0];
   }
 
-  // 特殊カード選択（公開後＝表向きなので真値で最善手を評価。core.js準拠）
-  // 甘えん坊/やんちゃ/お昼寝を全て試し total 最大の1枚を返す（base超のみ）。
-  function chooseSpecial(state, revealer) {
+  // ワン!宣言（公開前=裏向き。推定分布から的中確率pを計算し EV>0 かつ p>閾値 で宣言）
+  function chooseDeclaration(view, aiIndex, difficulty) {
+    const est = estimate(view, aiIndex);
+    const declaredN = Math.round(est.en);
+    if (declaredN < 1) return null;
+    // 的中確率の近似: 自分が置いた確定連番の割合が高いほど確信（自作連番ほど当てやすい）
+    const p = Math.min(1, est.knownRun / Math.max(1, declaredN));
+    const ev = 5 * p - 5 * (1 - p); // = 10p - 5
+    const threshold = DECL_THRESHOLD[difficulty] || 0.62;
+    if (ev > 0 && p > threshold) {
+      return { player: aiIndex, value: declaredN };
+    }
+    return null;
+  }
+
+  // 特殊カード選択（公開後=表向き＝全値が公開情報。rowVals(公開row値配列)とhandを明示受領）
+  // ※ここは公開後の公開情報のみを使うため view でなく確定 rowVals を受ける（state直接参照はしない）
+  function chooseSpecial(rowVals, hand, difficulty) {
     const GC = getCore();
-    const me = state.players[revealer];
     const has = function (name) {
-      return me.hand.some(function (c) { return c.t === "special" && c.s === name; });
+      return (hand || []).some(function (c) { return c.t === "special" && c.s === name; });
     };
-    const base = GC.scoreRow(state.row);
+    const base = GC.scoreRow(rowVals);
     let best = null;
     let bestTotal = base.total;
     if (has("ohirune")) {
-      const r = GC.scoreRow(state.row, { type: "ohirune" });
+      const r = GC.scoreRow(rowVals, { type: "ohirune" });
       if (r.total > bestTotal) { bestTotal = r.total; best = { type: "ohirune" }; }
     }
     if (has("amaenbo")) {
       for (let num = 1; num <= 12; num++) {
-        const r = GC.scoreRow(state.row, { type: "amaenbo", number: num });
+        const r = GC.scoreRow(rowVals, { type: "amaenbo", number: num });
         if (r.total > bestTotal) { bestTotal = r.total; best = { type: "amaenbo", number: num }; }
       }
     }
     if (has("yancha")) {
-      const r = GC.scoreRow(state.row, { type: "yancha" });
+      const r = GC.scoreRow(rowVals, { type: "yancha" });
       if (r.total > bestTotal) { bestTotal = r.total; best = { type: "yancha" }; }
     }
     return best;
   }
 
-  // 公開アクション（宣言＝公開前=裏向きなので記憶推定 / 特殊＝公開後=真値）
-  function withReveal(state, aiIndex, memory, difficulty) {
-    const special = chooseSpecial(state, aiIndex);
-    // 宣言: 記憶推定に基づく（真値カンニング禁止）。hardのみ・控えめ
-    const declarations = [];
-    if (difficulty === "hard") {
-      const est = estimateScore(estimateRow(state, aiIndex, memory));
-      if (est.n >= 3) declarations.push({ player: aiIndex, value: est.n });
-    }
-    return { type: "reveal", declarations: declarations, special: special };
-  }
-
-  // 他プレイヤーの公開への自分のワン！宣言（記憶推定ベース・真値参照禁止）
-  function chooseDeclaration(state, aiIndex, memory, difficulty) {
-    if (difficulty !== "hard") return null;
-    const est = estimateScore(estimateRow(state, aiIndex, memory));
-    if (est.n >= 4) return { player: aiIndex, value: est.n };
-    return null;
-  }
-
   const AI = {
-    DIFF_P: DIFF_P,
-    updateMemory: updateMemory,
+    DECL_THRESHOLD: DECL_THRESHOLD,
+    unseenPool: unseenPool,
+    estimate: estimate,
     chooseAction: chooseAction,
     chooseDeclaration: chooseDeclaration,
     chooseSpecial: chooseSpecial,
+    _mulberry32: mulberry32,
   };
   if (typeof module !== "undefined") module.exports = AI;
   if (typeof window !== "undefined") window.GameAI = AI;

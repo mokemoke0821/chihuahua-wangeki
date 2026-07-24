@@ -29,6 +29,12 @@
   .card.back { background:#5b3f2b; color:#c98a4b; font-size:22px; }
   .card.sp { background:#b56ad0; color:#fff; font-size:13px; width:56px; }
   .card.hl { outline:3px solid var(--good); }
+  .rc { position:relative; border:2px solid #7a5528; }
+  .ob { position:absolute; top:-7px; left:-3px; font-size:9px; line-height:1;
+    padding:2px 4px; border-radius:6px; color:#12100a; font-weight:800; white-space:nowrap; }
+  .rcv { font-size:20px; font-weight:800; color:#3a2410; }
+  .rcq { font-size:20px; color:#c98a4b; }
+  .rcown { box-shadow:0 0 0 2px var(--ink) inset; }
   .card.dim { opacity:.5; }
   .panel { background:var(--panel); border-radius:12px; padding:10px; margin:8px 0; }
   .row-cards { display:flex; flex-wrap:wrap; gap:2px; min-height:70px; }
@@ -56,6 +62,34 @@ const { useState, useEffect, useRef } = React;
 const GC = window.GameCore;
 const AI = window.GameAI;
 const SP_LABEL = { amaenbo: "甘えん坊", yancha: "やんちゃ", ohirune: "お昼寝" };
+const PCOLORS = ["#e8a04a", "#7ecb6b", "#6aa0e0", "#d07ad0"];
+function ownerBadge(placedBy, names, cpuFlags) {
+  const nm = names[placedBy] || ("P" + (placedBy + 1));
+  return (cpuFlags && cpuFlags[placedBy] ? "🤖" : "") + nm;
+}
+
+// 場の1枚（配置者バッジ常時表示・自分の置いたカードは値表示）
+function RowCard({ vc, names, cpuFlags, viewer }) {
+  const col = PCOLORS[vc.placedBy % PCOLORS.length];
+  const mine = vc.placedBy === viewer;
+  return <div className={"card rc" + (mine ? " rcown" : "")} style={{ borderColor: col }}>
+    <span className="ob" style={{ background: col }}>{ownerBadge(vc.placedBy, names, cpuFlags)}</span>
+    {vc.v != null ? <span className="rcv">{vc.v}</span> : <span className="rcq">🐕</span>}
+  </div>;
+}
+
+// history エントリ → 表示テキスト（公開情報のみ）
+function histText(h, names, cpuFlags) {
+  const nm = (i) => (cpuFlags && cpuFlags[i] ? "🤖" : "") + (names[i] || ("P" + (i + 1)));
+  if (h.type === "play") return nm(h.player) + " が " + (h.pos + 1) + "番目に置いた";
+  if (h.type === "move") return nm(h.player) + " が " + (h.from + 1) + "番目→" + (h.to + 1) + "番目へ移動";
+  if (h.type === "reveal") {
+    const r = h.result;
+    return "公開(" + nm(h.revealer) + "): [" + h.rowCards.map((c) => c.v).join(",") +
+      "] n=" + r.n + " " + r.total + "点" + (r.wangeki ? " ワン撃!" : "");
+  }
+  return "";
+}
 
 function evToText(e) {
   switch (e.type) {
@@ -98,7 +132,7 @@ function Card({ c, faceUp, hl, dim, onClick }) {
 }
 
 // 宣言収集モーダル（ワン！宣言フェーズ・全員が順に宣言/スキップ）
-function DeclareFlow({ state, names, cpuFlags, difficulty, memories, onDone }) {
+function DeclareFlow({ state, names, cpuFlags, difficulty, onDone }) {
   const [idx, setIdx] = useState(0);
   const [decls, setDecls] = useState([]);
   const n = state.playerCount;
@@ -106,8 +140,8 @@ function DeclareFlow({ state, names, cpuFlags, difficulty, memories, onDone }) {
   useEffect(() => {
     if (idx >= n) { onDone(decls); return; }
     if (cpuFlags[idx]) {
-      // CPU自動宣言
-      const d = AI.chooseDeclaration(state, idx, memories[idx] || {}, difficulty);
+      // CPU自動宣言（viewFor経由の推論のみ・真値カンニングなし）
+      const d = AI.chooseDeclaration(GC.viewFor(state, idx), idx, difficulty);
       const nd = d ? decls.concat([d]) : decls;
       const tmr = setTimeout(() => { setDecls(nd); setIdx(idx + 1); }, 350);
       return () => clearTimeout(tmr);
@@ -176,12 +210,12 @@ function App() {
   const [state, setState] = useState(null);
   const [names, setNames] = useState([]);
   const [cpuFlags, setCpuFlags] = useState([]);
-  const [memories, setMemories] = useState([]);
   const [log, setLog] = useState([]);
   const [reveal, setReveal] = useState(null); // 進行中の公開情報
   const [declaring, setDeclaring] = useState(null); // ワン！宣言フェーズ
   const [specialing, setSpecialing] = useState(null); // 公開者の特殊カード選択フェーズ
   const [passGate, setPassGate] = useState(false); // ホットシートのパス画面
+  const [logOpen, setLogOpen] = useState(true); // アクション履歴の開閉
   const seedRef = useRef(1);
   const stats = useRef(loadStats());
 
@@ -195,14 +229,13 @@ function App() {
     seedRef.current = seed;
     const total = cfg.mode === "cpu" ? 1 + cfg.cpu : cfg.players;
     const st = GC.newGame(seed, total);
-    const nm = [], cf = [], mem = [];
+    const nm = [], cf = [];
     for (let i = 0; i < total; i++) {
       if (cfg.mode === "cpu") { nm.push(i === 0 ? "あなた" : "CPU" + i); cf.push(i !== 0); }
       else { nm.push("P" + (i + 1)); cf.push(false); }
-      mem.push({ cells: {}, _rowLen: 0 });
     }
-    setNames(nm); setCpuFlags(cf); setMemories(mem);
-    setState(st); setLog([]); setReveal(null); setDeclaring(null);
+    setNames(nm); setCpuFlags(cf);
+    setState(st); setLog([]); setReveal(null); setDeclaring(null); setSpecialing(null);
     setScreen("game");
   }
 
@@ -213,7 +246,7 @@ function App() {
     if (!cpuFlags[state.current]) return;
     const tmr = setTimeout(() => {
       const ai = state.current;
-      const act = AI.chooseAction(state, ai, memories[ai] || {}, cfg.difficulty, seedRef.current);
+      const act = AI.chooseAction(GC.viewFor(state, ai), ai, cfg.difficulty, seedRef.current, GC.legalActions(state));
       doAction(act);
     }, 620);
     return () => clearTimeout(tmr);
@@ -222,16 +255,12 @@ function App() {
   function applyAndSet(action) {
     const res = GC.applyAction(state, action);
     pushLog(res.events);
-    // 全CPUの記憶更新
-    const rng = GC.mulberry32((seedRef.current + res.state.row.length * 7) >>> 0);
-    const newMem = memories.map((m, i) =>
-      cpuFlags[i] ? AI.updateMemory(JSON.parse(JSON.stringify(m)), res.events, i, cfg.difficulty, rng) : m);
-    setMemories(newMem);
+    // v0.2.0: 記憶モデル廃止。AIは viewFor 経由の推論のみ（updateMemory不要）
     const revealed = res.events.find((e) => e.type === "revealed");
     if (revealed) {
       const sc = res.events.find((e) => e.type === "score");
       const wans = res.events.filter((e) => e.type === "wan");
-      setReveal({ result: sc ? sc.detail : null, row: revealed.row, revealer: revealed.revealer, wans, forced: revealed.forced });
+      setReveal({ result: sc ? sc.detail : null, row: revealed.row, rowCards: revealed.rowCards, revealer: revealed.revealer, wans, forced: revealed.forced });
     }
     setState(res.state);
     if (res.state.finished) setScreen("gameover");
@@ -250,19 +279,24 @@ function App() {
       const revealer = state.current;
       // 強制公開(12枚目)は applyAction 前で state.row が11枚のまま。特殊選択/プレビューは
       // 「実際に採点される場」＝12枚目込みで判断すべきなので仮想 row を組む。
+      // 強制公開(12枚目)は applyAction 前で state.row が11枚。宣言/特殊選択の推論・プレビューは
+      // 「実際に採点される12枚目込みの場」で行うため仮想 revealState を組む。12枚目には placedBy を
+      // 付与し、公開者(=配置者)は自札の値を viewFor で見られる（AI過小評価を防止・他者は値null）。
       let revealState = state;
       if (willBe12th) {
         revealState = JSON.parse(JSON.stringify(state));
         const pc = state.players[revealer].hand[action.cardIndex];
-        revealState.row.push({ t: "butt", v: pc.v });
+        revealState.row.push({ t: "butt", v: pc.v, placedBy: revealer, id: revealState.cardSeq++, faceDown: true });
       }
       // ワン！宣言フェーズ（全員・裏向き） → 特殊カードフェーズ（公開者・表向き見て選択）
       setDeclaring({
+        declState: revealState,
         onDone: (decls) => {
           setDeclaring(null);
           if (cpuFlags[revealer]) {
-            // CPU: AIが表向き(採点対象の場)を見て最善の特殊を選択（強制公開でも一貫）
-            const sp = AI.chooseSpecial(revealState, revealer);
+            // CPU: 公開後=表向きの確定row値とhandで最善の特殊を選択（強制公開でも一貫）
+            const rowVals = revealState.row.map((c) => c.v);
+            const sp = AI.chooseSpecial(rowVals, revealState.players[revealer].hand, cfg.difficulty);
             applyAndSet(Object.assign({}, action, { declarations: decls, special: sp }));
             return;
           }
@@ -357,56 +391,78 @@ function App() {
     </div></div>;
   }
 
-  const humanTurn = !cpuFlags[me] && !state.finished;
+  // viewer=情報を見てよい主体。CPU対戦は常に人間(0)／ホットシートは手番プレイヤー。
+  const viewer = cfg.mode === "cpu" ? 0 : state.current;
+  const view = GC.viewFor(state, viewer);
+  const humanTurn = !cpuFlags[me] && !state.finished && viewer === me;
+  const myHand = view.players[viewer].hand || [];
+
   return <div className="wrap">
     <div className="players">
-      {state.players.map((p, i) =>
-        <div key={i} className={"pchip" + (i === me ? " cur" : "")}>
-          <b>{names[i]}</b> {p.score}点<br />
-          <span className="tag">🪙{p.tokens}</span> <span className="tag">手{p.hand.length}</span>
+      {view.players.map((p, i) =>
+        <div key={i} className={"pchip" + (i === me ? " cur" : "")}
+          style={{ boxShadow: "inset 0 -3px 0 " + PCOLORS[i % PCOLORS.length] }}>
+          <b>{cpuFlags[i] ? "🤖" : ""}{names[i]}</b> {p.score}点<br />
+          <span className="tag">🪙{p.tokens}</span> <span className="tag">手{p.handCount}</span>
         </div>)}
     </div>
 
     <div className="panel">
-      <div style={{ fontSize: 12, opacity: .8 }}>場（{state.row.length}/12）　山{state.deck.length} / 捨{state.discard.length}</div>
+      <div style={{ fontSize: 12, opacity: .8 }}>場（{view.row.length}/12）　山{view.deckCount} / 捨{view.discardCount}</div>
       <div className="row-cards">
-        {state.row.map((c, i) => <Card key={i} c={c} faceUp={false} />)}
-        {state.row.length === 0 && <span style={{ opacity: .5, fontSize: 13 }}>まだ場札なし</span>}
+        {view.row.map((vc, i) => <RowCard key={vc.id} vc={vc} names={names} cpuFlags={cpuFlags} viewer={viewer} />)}
+        {view.row.length === 0 && <span style={{ opacity: .5, fontSize: 13 }}>まだ場札なし</span>}
       </div>
+      <div className="sub">🔲枠の色＝配置者。値が見えるのは<b>自分が置いたカード</b>だけ（移動されても見え続ける）</div>
     </div>
 
     <div className="panel">
-      <div style={{ fontSize: 12, opacity: .8 }}>{names[me]} の手札</div>
+      <div style={{ fontSize: 12, opacity: .8 }}>{names[viewer]} の手札</div>
       <div className="hand">
-        {state.players[me].hand.map((c, i) =>
+        {myHand.map((c, i) =>
           <Card key={i} c={c} faceUp={true}
             dim={!humanTurn || c.t === "special"}
             onClick={humanTurn && c.t === "butt" ? () => humanPlay(i) : undefined} />)}
       </div>
       {humanTurn ? <div>
         <button onClick={humanReveal}>公開する</button>
-        <button className="ghost" disabled={state.players[me].tokens <= 0 || state.row.length < 1} onClick={humanMove}>移動（🪙-1）</button>
+        <button className="ghost" disabled={view.players[viewer].tokens <= 0 || view.row.length < 1} onClick={humanMove}>移動（🪙-1）</button>
         <div className="sub">おしりカードをタップで場に伏せて出す</div>
-      </div> : <div className="sub">{names[me]}（CPU）の手番…🐕</div>}
+      </div> : <div className="sub">{cpuFlags[me] ? names[me] + "（CPU）の手番…🤖" : names[me] + "の手番"}</div>}
     </div>
 
-    {reveal && <RevealModal reveal={reveal} names={names} onClose={() => setReveal(null)} />}
-    {declaring && <DeclareFlow state={state} names={names} cpuFlags={cpuFlags}
-      difficulty={cfg.difficulty} memories={memories} onDone={declaring.onDone} />}
+    {reveal && <RevealModal reveal={reveal} names={names} cpuFlags={cpuFlags} onClose={() => setReveal(null)} />}
+    {declaring && <DeclareFlow state={declaring.declState} names={names} cpuFlags={cpuFlags}
+      difficulty={cfg.difficulty} onDone={declaring.onDone} />}
     {specialing && <SpecialFlow state={specialing.state} revealer={specialing.revealer}
       specials={specialing.specials} names={names} onDone={specialing.onDone} />}
 
-    <div className="panel log">{log.map((l, i) => <div key={i}>{l}</div>)}</div>
+    <div className="panel">
+      <div style={{ cursor: "pointer", fontSize: 13 }} onClick={() => setLogOpen(!logOpen)}>
+        📜 アクション履歴 {logOpen ? "▼" : "▶"}（{view.history.length}）
+      </div>
+      {logOpen && <div className="log">
+        {view.history.slice().reverse().map((h, i) => <div key={i}>{histText(h, names, cpuFlags)}</div>)}
+      </div>}
+    </div>
   </div>;
 }
 
-function RevealModal({ reveal, names, onClose }) {
+function RevealModal({ reveal, names, cpuFlags, onClose }) {
   const r = reveal.result;
+  const cards = reveal.rowCards || reveal.row.map((v) => ({ v: v, placedBy: 0 }));
   return <div className="modal"><div className="sheet">
     <div className="center"><b>公開！</b> {reveal.forced ? "（12枚で強制公開）" : ""}</div>
     <div className="row-cards center" style={{ justifyContent: "center", margin: "8px 0" }}>
-      {reveal.row.map((v, i) => <div key={i} className={"card" + (r && i < r.n ? " hl" : "")}>{v}</div>)}
+      {cards.map((c, i) => {
+        const col = PCOLORS[c.placedBy % PCOLORS.length];
+        return <div key={i} className={"card rc" + (r && i < r.n ? " hl" : "")} style={{ borderColor: col }}>
+          <span className="ob" style={{ background: col }}>{ownerBadge(c.placedBy, names, cpuFlags)}</span>
+          <span className="rcv">{c.v}</span>
+        </div>;
+      })}
     </div>
+    <div className="sub center">枠色＝配置者（誰が置いたか）</div>
     {r && <div className="breakdown center">
       {r.wangeki ? <div className="big win">ワン撃！🐕‼ 即勝利</div> : <div>
         連番 n={r.n} / 基礎点 {r.base} / 重複ペナ -{r.penalty}<br />

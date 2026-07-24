@@ -39,7 +39,7 @@
 | ファイル | 役割 |
 |----------|------|
 | `core.js` | ゲームロジック純関数群（**UI非依存**・Phase 2 Django移植の核）。`newGame/legalActions/applyAction/scoreRow` |
-| `ai.js`   | CPU AI（記憶モデル＋ヒューリスティック・core非依存で分離） |
+| `ai.js`   | CPU AI（**推論モデル**・v0.2.0で記憶忘却モデル廃止＝`viewFor`の公開情報＋未出現分布から推定・core非依存で分離） |
 | `index.html` | React(CDN)+Babel の UI。`core.js`/`ai.js` を script 読込 |
 | `test/core.test.js` | 単体テスト（依存なし・`node test/core.test.js`） |
 

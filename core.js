@@ -67,13 +67,17 @@ function newGame(seed, playerCount) {
     deck: deck,
     discard: [],
     players: players,
-    row: [], // butt cards, face-down
+    // 場札 row: { t:"butt", v, placedBy, id, faceDown }。値vは配置者のみ可視（viewForで制御）。
+    row: [],
+    cardSeq: 0, // 場札の連番ID採番
     current: 0,
     starter: 0,
     phase: "play", // "play" | "gameover"
     finished: false,
     winner: null, // index | "draw" | null
     lastReveal: null, // 直近公開の結果（UI表示用）
+    // 公開情報のアクション履歴（値は公開後のみ。裏向き値は漏らさない）
+    history: [],
   };
 }
 
@@ -170,21 +174,23 @@ function scoreRow(row, special) {
   let base = (n * (n + 1)) / 2;
   if (yanchaUsed) base -= yanchaMissing;
 
+  let wangeki = false;
+  if (n === 12) {
+    if (!special) {
+      wangeki = true; // 特殊不使用の12連番＝ワン撃（即勝利）
+    } else {
+      // 特殊カードでn=12到達は基礎点66（ワン撃不成立）。以降 重複ペナ/お昼寝を通常適用
+      base = 66;
+    }
+  }
+
   let penalty = 0;
   for (const k in occ) {
     if (occ[k] >= 2) penalty += Number(k) * occ[k];
   }
   if (special && special.type === "ohirune") penalty = 0; // お昼寝: 重複ペナ無効
 
-  let total = base - penalty;
-  let wangeki = false;
-  if (n === 12) {
-    if (!special) {
-      wangeki = true; // 特殊不使用の12連番＝ワン撃（即勝利）
-    } else {
-      total = 66; // 特殊カードで n=12 到達は 66点固定（ワン撃不成立・仕様§特殊）
-    }
-  }
+  const total = base - penalty;
   return { n: n, base: base, penalty: penalty, total: total, wangeki: wangeki };
 }
 
@@ -225,8 +231,12 @@ function applyAction(state, action) {
       return { state: state, events: [{ type: "error", message: "cannot play this card" }] };
     }
     me.hand.splice(action.cardIndex, 1);
-    s.row.push({ t: "butt", v: card.v });
-    events.push({ type: "played", player: cur, value: card.v });
+    const cid = s.cardSeq++;
+    s.row.push({ t: "butt", v: card.v, placedBy: cur, id: cid, faceDown: true });
+    const pos = s.row.length - 1;
+    // 公開情報のみ（値は含めない＝配置者だけがviewForで見る）
+    s.history.push({ type: "play", player: cur, pos: pos, id: cid });
+    events.push({ type: "played", player: cur, pos: pos, id: cid });
 
     if (s.row.length >= 12) {
       // 12枚目を置いた→即時強制公開（このプレイヤーが公開者）
@@ -252,7 +262,9 @@ function applyAction(state, action) {
     const card = s.row.splice(from, 1)[0];
     s.row.splice(to, 0, card);
     me.tokens -= 1;
-    events.push({ type: "moved", player: cur, from: from, to: to, tokensLeft: me.tokens });
+    // 公開情報: 誰が・何番目→何番目（値は含めない）
+    s.history.push({ type: "move", player: cur, from: from, to: to, id: card.id });
+    events.push({ type: "moved", player: cur, from: from, to: to, id: card.id, tokensLeft: me.tokens });
     refill(s);
     advance(s);
     return { state: s, events: events };
@@ -270,8 +282,17 @@ function doReveal(s, revealer, declarations, special, events, forced) {
   const rowVals = s.row.map(function (c) {
     return c.v;
   });
+  // 公開後は全カードの値・配置者が公開情報（貢献の可視化）
+  const rowCards = s.row.map(function (c) {
+    return { v: c.v, placedBy: c.placedBy, id: c.id };
+  });
   const res = scoreRow(s.row, special);
-  events.push({ type: "revealed", revealer: revealer, row: rowVals, forced: forced });
+  events.push({ type: "revealed", revealer: revealer, row: rowVals, rowCards: rowCards, forced: forced });
+  s.history.push({
+    type: "reveal", revealer: revealer, rowCards: rowCards, forced: forced,
+    result: { n: res.n, base: res.base, penalty: res.penalty, total: res.total, wangeki: res.wangeki },
+    special: special ? special.type : null,
+  });
 
   // 特殊カードは公開者の手札から消費（使用時）
   if (special && special.type) {
@@ -348,6 +369,48 @@ function advance(s) {
   s.current = (s.current + 1) % s.playerCount;
 }
 
+// ---- viewFor(state, playerIndex) → 視点別ビュー（Phase2サーバー権威化でも必須） ----
+// 見てよい情報のみ: 自分が置いたカードの値（移動後も配置者に可視）／他人のカードは
+// placedBy+位置のみ（v=null）／他人の手札は枚数のみ／捨て札・履歴・得点は公開。
+function viewFor(state, playerIndex) {
+  const s = state;
+  return {
+    playerCount: s.playerCount,
+    current: s.current,
+    starter: s.starter,
+    finished: s.finished,
+    winner: s.winner,
+    deckCount: s.deck.length,
+    discardCount: s.discard.length,
+    // 捨て札は公開情報
+    discard: s.discard.map(function (c) {
+      return c.t === "butt" ? { t: "butt", v: c.v } : { t: "special", s: c.s };
+    }),
+    row: s.row.map(function (c, i) {
+      const own = c.placedBy === playerIndex;
+      return {
+        pos: i,
+        placedBy: c.placedBy,
+        id: c.id,
+        faceDown: true,
+        v: own ? c.v : null, // 値は配置者のみ（移動されても配置者は見え続ける）
+      };
+    }),
+    players: s.players.map(function (p, i) {
+      if (i === playerIndex) {
+        return {
+          index: i, score: p.score, tokens: p.tokens,
+          hand: p.hand.slice(), handCount: p.hand.length, you: true,
+        };
+      }
+      return { index: i, score: p.score, tokens: p.tokens, handCount: p.hand.length, you: false };
+    }),
+    history: s.history.slice(),
+    lastReveal: s.lastReveal,
+    viewer: playerIndex,
+  };
+}
+
 // ---- export（ブラウザ/node両対応） ----
 const GameCore = {
   mulberry32: mulberry32,
@@ -355,6 +418,7 @@ const GameCore = {
   newGame: newGame,
   legalActions: legalActions,
   applyAction: applyAction,
+  viewFor: viewFor,
   scoreRow: scoreRow,
   settleWan: settleWan,
   checkVictory: checkVictory,
