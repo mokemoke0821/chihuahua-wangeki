@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>チワワでワン撃 🐕</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="./core.js"></script>
+<script src="./ai.js"></script>
+<style>
+  :root { --bg:#2a1c14; --panel:#3d2a1e; --accent:#e8a04a; --ink:#fbeede; --good:#7ecb6b; --bad:#e56b6b; --face:#c98a4b; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; padding:0; background:var(--bg); color:var(--ink);
+    font-family:system-ui,"Segoe UI",sans-serif; }
+  #root { min-height:100dvh; }
+  .wrap { max-width:520px; margin:0 auto; padding:12px; }
+  h1 { font-size:26px; text-align:center; margin:10px 0; }
+  .sub { text-align:center; opacity:.8; font-size:13px; margin-bottom:14px; }
+  button { font-family:inherit; font-size:15px; border:none; border-radius:10px;
+    padding:11px 14px; background:var(--accent); color:#2a1c14; font-weight:700;
+    cursor:pointer; margin:4px 2px; }
+  button.ghost { background:#5a4433; color:var(--ink); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .card { display:inline-flex; align-items:center; justify-content:center;
+    width:46px; height:64px; border-radius:8px; margin:3px; font-weight:800; font-size:20px;
+    background:var(--face); color:#3a2410; box-shadow:0 2px 0 #7a5528; }
+  .card.back { background:#5b3f2b; color:#c98a4b; font-size:22px; }
+  .card.sp { background:#b56ad0; color:#fff; font-size:13px; width:56px; }
+  .card.hl { outline:3px solid var(--good); }
+  .card.dim { opacity:.5; }
+  .panel { background:var(--panel); border-radius:12px; padding:10px; margin:8px 0; }
+  .row-cards { display:flex; flex-wrap:wrap; gap:2px; min-height:70px; }
+  .hand { display:flex; flex-wrap:wrap; }
+  .players { display:flex; gap:6px; flex-wrap:wrap; }
+  .pchip { background:#4a3323; border-radius:9px; padding:6px 9px; font-size:12px; flex:1 1 40%; }
+  .pchip.cur { outline:2px solid var(--accent); }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.72); display:flex;
+    align-items:center; justify-content:center; padding:16px; z-index:10; }
+  .sheet { background:var(--panel); border-radius:16px; padding:18px; max-width:480px; width:100%; }
+  .num-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:6px; margin:10px 0; }
+  .num-grid button { padding:12px 0; margin:0; }
+  .tag { font-size:11px; background:#5a4433; padding:2px 6px; border-radius:6px; }
+  .log { font-size:12px; opacity:.85; max-height:96px; overflow:auto; margin-top:6px; }
+  .center { text-align:center; }
+  .big { font-size:34px; }
+  .breakdown { font-size:13px; line-height:1.6; }
+  .win { color:var(--good); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/jsx" id="appsrc">
+const { useState, useEffect, useRef } = React;
+const GC = window.GameCore;
+const AI = window.GameAI;
+const SP_LABEL = { amaenbo: "甘えん坊", yancha: "やんちゃ", ohirune: "お昼寝" };
+
+function evToText(e) {
+  switch (e.type) {
+    case "played": return "P" + (e.player + 1) + " が場に伏せた";
+    case "moved": return "P" + (e.player + 1) + " が場札を移動 (🪙" + e.tokensLeft + ")";
+    case "forcedReveal": return "12枚→P" + (e.player + 1) + " 強制公開！";
+    case "revealed": return "公開: [" + e.row.join(",") + "]";
+    case "score": { var pn = (e.revealer !== undefined ? e.revealer : e.player) + 1; return "P" + pn + " " + (e.delta >= 0 ? "+" : "") + e.delta + "点"; }
+    case "wan": return "P" + (e.player + 1) + " ワン！" + (e.delta > 0 ? "+" : "") + e.delta;
+    case "specialUsed": return "特殊: " + (SP_LABEL[e.special] || e.special);
+    case "gameover": return "🏆 " + (e.winner === "draw" ? "引き分け" : "P" + (e.winner + 1) + "勝利") + " (" + e.reason + ")";
+    case "error": return "⚠ " + e.message;
+    default: return "";
+  }
+}
+
+function seedFromTime() {
+  // 決定論を壊さないが対局ごとに変わる seed（起動時1回・以後は固定）
+  let s = 0;
+  const str = String(Date.now()) + Math.floor(Math.random() * 1e9);
+  for (let i = 0; i < str.length; i++) s = (s * 31 + str.charCodeAt(i)) >>> 0;
+  return s || 1;
+}
+
+function loadStats() {
+  try { return JSON.parse(localStorage.getItem("cw_stats") || "{}"); }
+  catch (e) { return {}; }
+}
+function saveStats(st) {
+  try { localStorage.setItem("cw_stats", JSON.stringify(st)); } catch (e) {}
+}
+
+function Card({ c, faceUp, hl, dim, onClick }) {
+  if (!c) return null;
+  if (c.t === "special") {
+    return <div className={"card sp" + (dim ? " dim" : "")} onClick={onClick}>{SP_LABEL[c.s]}</div>;
+  }
+  if (!faceUp) return <div className={"card back" + (hl ? " hl" : "")} onClick={onClick}>🐕</div>;
+  return <div className={"card" + (hl ? " hl" : "") + (dim ? " dim" : "")} onClick={onClick}>{c.v}</div>;
+}
+
+// 宣言収集モーダル（ワン！宣言フェーズ・全員が順に宣言/スキップ）
+function DeclareFlow({ state, names, cpuFlags, difficulty, memories, onDone }) {
+  const [idx, setIdx] = useState(0);
+  const [decls, setDecls] = useState([]);
+  const n = state.playerCount;
+
+  useEffect(() => {
+    if (idx >= n) { onDone(decls); return; }
+    if (cpuFlags[idx]) {
+      // CPU自動宣言
+      const d = AI.chooseDeclaration(state, idx, memories[idx] || {}, difficulty);
+      const nd = d ? decls.concat([d]) : decls;
+      const tmr = setTimeout(() => { setDecls(nd); setIdx(idx + 1); }, 350);
+      return () => clearTimeout(tmr);
+    }
+  }, [idx]);
+
+  if (idx >= n) return null;
+  if (cpuFlags[idx]) {
+    return <div className="modal"><div className="sheet center">
+      <div>{names[idx]}（CPU）が思考中…🐕</div></div></div>;
+  }
+  const pick = (v) => { setDecls(v === null ? decls : decls.concat([{ player: idx, value: v }])); setIdx(idx + 1); };
+  return <div className="modal"><div className="sheet">
+    <div className="center"><b>{names[idx]}</b> のワン！宣言</div>
+    <div className="sub">連番が何まで続くか予想（当たれば+5 / 外れれば-5）。カードはまだ裏向き。</div>
+    <div className="num-grid">
+      {Array.from({ length: 12 }, (_, i) => i + 1).map((v) =>
+        <button key={v} onClick={() => pick(v)}>{v}</button>)}
+    </div>
+    <div className="center"><button className="ghost" onClick={() => pick(null)}>宣言しない</button></div>
+  </div></div>;
+}
+
+// 特殊カード選択（公開者のみ・場を表向きで見て選ぶ。甘えん坊は欠け数字も選択）
+function SpecialFlow({ state, revealer, specials, names, onDone }) {
+  const [amaePick, setAmaePick] = useState(false);
+  const rowVals = state.row.map((c) => c.v);
+  const has = (name) => specials.some((c) => c.s === name);
+  const base = GC.scoreRow(state.row);
+  const preview = (sp) => GC.scoreRow(state.row, sp).total;
+
+  if (amaePick) {
+    return <div className="modal"><div className="sheet">
+      <div className="center"><b>甘えん坊</b>: 補完する欠け数字を選択</div>
+      <div className="row-cards center" style={{ justifyContent: "center", margin: "6px 0" }}>
+        {rowVals.map((v, i) => <div key={i} className="card">{v}</div>)}
+      </div>
+      <div className="num-grid">
+        {Array.from({ length: 12 }, (_, i) => i + 1).map((v) =>
+          <button key={v} onClick={() => onDone({ type: "amaenbo", number: v })}>
+            {v}<br /><span style={{ fontSize: 10 }}>{preview({ type: "amaenbo", number: v })}点</span>
+          </button>)}
+      </div>
+      <div className="center"><button className="ghost" onClick={() => setAmaePick(false)}>戻る</button></div>
+    </div></div>;
+  }
+
+  return <div className="modal"><div className="sheet">
+    <div className="center"><b>{names[revealer]}</b> の特殊カード（任意・最大1枚）</div>
+    <div className="row-cards center" style={{ justifyContent: "center", margin: "8px 0" }}>
+      {rowVals.map((v, i) => <div key={i} className="card">{v}</div>)}
+    </div>
+    <div className="sub center">現在の得点: {base.total}点（n={base.n} / ペナ-{base.penalty}）</div>
+    <div className="center">
+      {has("ohirune") && <button onClick={() => onDone({ type: "ohirune" })}>お昼寝<br /><span style={{ fontSize: 10 }}>{preview({ type: "ohirune" })}点</span></button>}
+      {has("yancha") && <button onClick={() => onDone({ type: "yancha" })}>やんちゃ<br /><span style={{ fontSize: 10 }}>{preview({ type: "yancha" })}点</span></button>}
+      {has("amaenbo") && <button onClick={() => setAmaePick(true)}>甘えん坊…</button>}
+    </div>
+    <div className="center" style={{ marginTop: 8 }}><button className="ghost" onClick={() => onDone(null)}>特殊を使わない</button></div>
+  </div></div>;
+}
+
+function App() {
+  const [screen, setScreen] = useState("title");
+  const [cfg, setCfg] = useState({ mode: "cpu", players: 2, cpu: 1, difficulty: "normal" });
+  const [state, setState] = useState(null);
+  const [names, setNames] = useState([]);
+  const [cpuFlags, setCpuFlags] = useState([]);
+  const [memories, setMemories] = useState([]);
+  const [log, setLog] = useState([]);
+  const [reveal, setReveal] = useState(null); // 進行中の公開情報
+  const [declaring, setDeclaring] = useState(null); // ワン！宣言フェーズ
+  const [specialing, setSpecialing] = useState(null); // 公開者の特殊カード選択フェーズ
+  const [passGate, setPassGate] = useState(false); // ホットシートのパス画面
+  const seedRef = useRef(1);
+  const stats = useRef(loadStats());
+
+  function pushLog(events) {
+    const lines = events.map(evToText).filter(Boolean);
+    if (lines.length) setLog((L) => lines.concat(L).slice(0, 40));
+  }
+
+  function startGame() {
+    const seed = seedFromTime();
+    seedRef.current = seed;
+    const total = cfg.mode === "cpu" ? 1 + cfg.cpu : cfg.players;
+    const st = GC.newGame(seed, total);
+    const nm = [], cf = [], mem = [];
+    for (let i = 0; i < total; i++) {
+      if (cfg.mode === "cpu") { nm.push(i === 0 ? "あなた" : "CPU" + i); cf.push(i !== 0); }
+      else { nm.push("P" + (i + 1)); cf.push(false); }
+      mem.push({ cells: {}, _rowLen: 0 });
+    }
+    setNames(nm); setCpuFlags(cf); setMemories(mem);
+    setState(st); setLog([]); setReveal(null); setDeclaring(null);
+    setScreen("game");
+  }
+
+  // CPU手番の自動進行
+  useEffect(() => {
+    if (screen !== "game" || !state || state.finished) return;
+    if (declaring || reveal || specialing) return;
+    if (!cpuFlags[state.current]) return;
+    const tmr = setTimeout(() => {
+      const ai = state.current;
+      const act = AI.chooseAction(state, ai, memories[ai] || {}, cfg.difficulty, seedRef.current);
+      doAction(act);
+    }, 620);
+    return () => clearTimeout(tmr);
+  }, [screen, state, declaring, reveal, specialing, cpuFlags]);
+
+  function applyAndSet(action) {
+    const res = GC.applyAction(state, action);
+    pushLog(res.events);
+    // 全CPUの記憶更新
+    const rng = GC.mulberry32((seedRef.current + res.state.row.length * 7) >>> 0);
+    const newMem = memories.map((m, i) =>
+      cpuFlags[i] ? AI.updateMemory(JSON.parse(JSON.stringify(m)), res.events, i, cfg.difficulty, rng) : m);
+    setMemories(newMem);
+    const revealed = res.events.find((e) => e.type === "revealed");
+    if (revealed) {
+      const sc = res.events.find((e) => e.type === "score");
+      const wans = res.events.filter((e) => e.type === "wan");
+      setReveal({ result: sc ? sc.detail : null, row: revealed.row, revealer: revealed.revealer, wans, forced: revealed.forced });
+    }
+    setState(res.state);
+    if (res.state.finished) setScreen("gameover");
+    // ホットシート: 次が人間なら パス画面
+    if (cfg.mode === "hotseat" && !res.state.finished && !revealed) setPassGate(true);
+  }
+
+  // アクション実行の入口（公開は宣言フローを挟む）
+  function doAction(action) {
+    if (!state) return;
+    const willBeReveal = action.type === "reveal";
+    const willBe12th = action.type === "play" && state.row.length === 11 &&
+      state.players[state.current].hand[action.cardIndex] &&
+      state.players[state.current].hand[action.cardIndex].t === "butt";
+    if (willBeReveal || willBe12th) {
+      const revealer = state.current;
+      // 強制公開(12枚目)は applyAction 前で state.row が11枚のまま。特殊選択/プレビューは
+      // 「実際に採点される場」＝12枚目込みで判断すべきなので仮想 row を組む。
+      let revealState = state;
+      if (willBe12th) {
+        revealState = JSON.parse(JSON.stringify(state));
+        const pc = state.players[revealer].hand[action.cardIndex];
+        revealState.row.push({ t: "butt", v: pc.v });
+      }
+      // ワン！宣言フェーズ（全員・裏向き） → 特殊カードフェーズ（公開者・表向き見て選択）
+      setDeclaring({
+        onDone: (decls) => {
+          setDeclaring(null);
+          if (cpuFlags[revealer]) {
+            // CPU: AIが表向き(採点対象の場)を見て最善の特殊を選択（強制公開でも一貫）
+            const sp = AI.chooseSpecial(revealState, revealer);
+            applyAndSet(Object.assign({}, action, { declarations: decls, special: sp }));
+            return;
+          }
+          const specials = state.players[revealer].hand.filter((c) => c.t === "special");
+          if (specials.length === 0) {
+            applyAndSet(Object.assign({}, action, { declarations: decls, special: null }));
+            return;
+          }
+          // 人間公開者: 特殊カード選択UIへ（採点対象の場を見て決める）
+          setSpecialing({
+            state: revealState, revealer, decls, action, specials,
+            onDone: (special) => {
+              setSpecialing(null);
+              applyAndSet(Object.assign({}, action, { declarations: decls, special }));
+            },
+          });
+        },
+      });
+      return;
+    }
+    applyAndSet(action);
+  }
+
+  function humanPlay(cardIndex) { doAction({ type: "play", cardIndex }); }
+  function humanReveal() { doAction({ type: "reveal" }); }
+  function humanMove() {
+    const from = prompt("移動する場札の位置 (1〜" + state.row.length + ")");
+    if (from === null) return;
+    const to = prompt("挿入先の位置 (1〜" + state.row.length + ")");
+    if (to === null) return;
+    doAction({ type: "move", from: (parseInt(from, 10) || 1) - 1, to: (parseInt(to, 10) || 1) - 1 });
+  }
+
+  // --- 画面 ---
+  if (screen === "title") {
+    return <div className="wrap">
+      <h1>チワワでワン撃 🐕</h1>
+      <div className="sub">記憶とブラフの連番構築カードゲーム / Phase 1</div>
+      <div className="panel">
+        <div className="center"><b>モード</b></div>
+        <div className="center">
+          <button className={cfg.mode === "cpu" ? "" : "ghost"} onClick={() => setCfg({ ...cfg, mode: "cpu" })}>CPU対戦</button>
+          <button className={cfg.mode === "hotseat" ? "" : "ghost"} onClick={() => setCfg({ ...cfg, mode: "hotseat" })}>ホットシート</button>
+        </div>
+        {cfg.mode === "cpu" ? <div className="center" style={{ marginTop: 10 }}>
+          <div>CPU人数</div>
+          {[1, 2, 3].map((k) => <button key={k} className={cfg.cpu === k ? "" : "ghost"} onClick={() => setCfg({ ...cfg, cpu: k })}>{k}体</button>)}
+          <div style={{ marginTop: 8 }}>難易度</div>
+          {["easy", "normal", "hard"].map((d) => <button key={d} className={cfg.difficulty === d ? "" : "ghost"} onClick={() => setCfg({ ...cfg, difficulty: d })}>{d}</button>)}
+        </div> : <div className="center" style={{ marginTop: 10 }}>
+          <div>人数</div>
+          {[2, 3, 4].map((k) => <button key={k} className={cfg.players === k ? "" : "ghost"} onClick={() => setCfg({ ...cfg, players: k })}>{k}人</button>)}
+        </div>}
+      </div>
+      <div className="center"><button style={{ fontSize: 18, padding: "14px 28px" }} onClick={startGame}>ゲーム開始 🐾</button></div>
+      <div className="panel center" style={{ fontSize: 12 }}>
+        通算: {(stats.current.games || 0)}戦 / あなた{(stats.current.wins || 0)}勝
+      </div>
+      <RulesShort />
+    </div>;
+  }
+
+  if (!state) return <div className="wrap">…</div>;
+  const me = state.current;
+
+  if (screen === "gameover") {
+    const w = state.winner;
+    // 戦績保存
+    return <div className="wrap center">
+      <h1>{w === "draw" ? "引き分け" : names[w] + " の勝ち！"} 🏆</h1>
+      <div className="panel">
+        {state.players.map((p, i) => <div key={i} className={i === w ? "win" : ""}>{names[i]}: {p.score}点</div>)}
+      </div>
+      <button onClick={() => { recordResult(w); setScreen("title"); }}>タイトルへ</button>
+    </div>;
+  }
+
+  function recordResult(w) {
+    const s = stats.current;
+    s.games = (s.games || 0) + 1;
+    if (cfg.mode === "cpu" && w === 0) s.wins = (s.wins || 0) + 1;
+    saveStats(s); stats.current = s;
+  }
+
+  // ホットシートのパス画面
+  if (passGate && cfg.mode === "hotseat" && !cpuFlags[me]) {
+    return <div className="modal"><div className="sheet center">
+      <div className="big">🐕</div>
+      <div><b>{names[me]}</b> の番です</div>
+      <div className="sub">他の人は画面を見ないでね</div>
+      <button onClick={() => setPassGate(false)}>手札を見る</button>
+    </div></div>;
+  }
+
+  const humanTurn = !cpuFlags[me] && !state.finished;
+  return <div className="wrap">
+    <div className="players">
+      {state.players.map((p, i) =>
+        <div key={i} className={"pchip" + (i === me ? " cur" : "")}>
+          <b>{names[i]}</b> {p.score}点<br />
+          <span className="tag">🪙{p.tokens}</span> <span className="tag">手{p.hand.length}</span>
+        </div>)}
+    </div>
+
+    <div className="panel">
+      <div style={{ fontSize: 12, opacity: .8 }}>場（{state.row.length}/12）　山{state.deck.length} / 捨{state.discard.length}</div>
+      <div className="row-cards">
+        {state.row.map((c, i) => <Card key={i} c={c} faceUp={false} />)}
+        {state.row.length === 0 && <span style={{ opacity: .5, fontSize: 13 }}>まだ場札なし</span>}
+      </div>
+    </div>
+
+    <div className="panel">
+      <div style={{ fontSize: 12, opacity: .8 }}>{names[me]} の手札</div>
+      <div className="hand">
+        {state.players[me].hand.map((c, i) =>
+          <Card key={i} c={c} faceUp={true}
+            dim={!humanTurn || c.t === "special"}
+            onClick={humanTurn && c.t === "butt" ? () => humanPlay(i) : undefined} />)}
+      </div>
+      {humanTurn ? <div>
+        <button onClick={humanReveal}>公開する</button>
+        <button className="ghost" disabled={state.players[me].tokens <= 0 || state.row.length < 1} onClick={humanMove}>移動（🪙-1）</button>
+        <div className="sub">おしりカードをタップで場に伏せて出す</div>
+      </div> : <div className="sub">{names[me]}（CPU）の手番…🐕</div>}
+    </div>
+
+    {reveal && <RevealModal reveal={reveal} names={names} onClose={() => setReveal(null)} />}
+    {declaring && <DeclareFlow state={state} names={names} cpuFlags={cpuFlags}
+      difficulty={cfg.difficulty} memories={memories} onDone={declaring.onDone} />}
+    {specialing && <SpecialFlow state={specialing.state} revealer={specialing.revealer}
+      specials={specialing.specials} names={names} onDone={specialing.onDone} />}
+
+    <div className="panel log">{log.map((l, i) => <div key={i}>{l}</div>)}</div>
+  </div>;
+}
+
+function RevealModal({ reveal, names, onClose }) {
+  const r = reveal.result;
+  return <div className="modal"><div className="sheet">
+    <div className="center"><b>公開！</b> {reveal.forced ? "（12枚で強制公開）" : ""}</div>
+    <div className="row-cards center" style={{ justifyContent: "center", margin: "8px 0" }}>
+      {reveal.row.map((v, i) => <div key={i} className={"card" + (r && i < r.n ? " hl" : "")}>{v}</div>)}
+    </div>
+    {r && <div className="breakdown center">
+      {r.wangeki ? <div className="big win">ワン撃！🐕‼ 即勝利</div> : <div>
+        連番 n={r.n} / 基礎点 {r.base} / 重複ペナ -{r.penalty}<br />
+        <b>{names[reveal.revealer]} に {r.total}点</b>
+      </div>}
+      {reveal.wans.map((w, i) => <div key={i}>{names[w.player]} ワン！{w.delta > 0 ? "+" : ""}{w.delta}</div>)}
+    </div>}
+    <div className="center"><button onClick={onClose}>次へ</button></div>
+  </div></div>;
+}
+
+function RulesShort() {
+  return <div className="panel" style={{ fontSize: 12, lineHeight: 1.6 }}>
+    <b>ルール要約</b><br />
+    手番: おしりカードを裏向きで場に出す / 公開して得点 / 場札を移動（🪙）。<br />
+    公開: 左端から1,2,3…と連番が続く長さnで基礎点 n(n+1)/2。重複は減点。<br />
+    1〜12を特殊カードなしで揃えたら<b>ワン撃</b>で即勝利。累計150点でも勝ち。<br />
+    特殊: 甘えん坊(欠け1つ補完)/やんちゃ(欠け無視・その分減点)/お昼寝(重複ペナ無効)。
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+<script>
+  // Babel を classic runtime で明示 transform（automatic runtimeのimport注入を回避）
+  (function () {
+    function boot() {
+      try {
+        var src = document.getElementById("appsrc").textContent;
+        var out = Babel.transform(src, {
+          presets: [["react", { runtime: "classic" }]],
+        }).code;
+        (0, eval)(out);
+      } catch (e) {
+        var pre = document.createElement("pre");
+        pre.style.cssText = "color:#e56b6b;padding:16px;white-space:pre-wrap";
+        pre.textContent = "起動エラー: " + (e && e.message ? e.message : e);
+        var root = document.getElementById("root");
+        root.textContent = "";
+        root.appendChild(pre);
+        throw e;
+      }
+    }
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", boot);
+    } else {
+      boot();
+    }
+  })();
+</script>
+</body>
+</html>
